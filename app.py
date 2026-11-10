@@ -37,6 +37,7 @@ from flask.sessions import SecureCookieSessionInterface
 from itsdangerous import TimestampSigner, BadSignature, SignatureExpired
 from PIL import Image, ImageOps
 
+import activity_insights
 import activity_tiers
 import cloud_backup
 import database as db
@@ -3902,13 +3903,19 @@ def _usage_cached(key, build):
 
 def _usage_assemble(days, user_id, first_day, agg, visits_by_day, source, granularity, reduced, note, range_key):
     """Shared by the raw and the summary path: turns aggregates into the panel's JSON."""
+    try:
+        started = activity_insights.first_tracked_day()
+    except Exception:
+        started = None
+    if started and started > first_day:
+        first_day = min(started, agg["last_day"])
     if granularity == "week":
         day_labels, d = [], first_day - timedelta(days=first_day.weekday())
         while d <= agg["last_day"]:
             day_labels.append(d.isoformat())
             d += timedelta(days=7)
     else:
-        day_labels = [(first_day + timedelta(days=i)).isoformat() for i in range(days)]
+        day_labels = [(first_day + timedelta(days=i)).isoformat() for i in range((agg["last_day"] - first_day).days + 1)]
     by_day = {d: (actions, users) for d, actions, users in agg["daily"]}
 
     hours = None
@@ -3955,13 +3962,26 @@ def _usage_assemble(days, user_id, first_day, agg, visits_by_day, source, granul
     }
 
 
+def _usage_insights(first_day, last_day, user_id, range_key):
+    """Weekday heatmap, Sunday comparison, new vs returning, dormant dealers, previous period
+    (activity_insights.py). Finished days only. A failure here hides those panels, never the charts."""
+    try:
+        activity_tiers.ensure_summaries(quick=True)
+        return activity_insights.build(first_day, last_day, user_id, compare=(range_key != "all"))
+    except Exception as exc:
+        logger.warning("usage insights failed (%s)", type(exc).__name__)
+        return {}
+
+
 def _usage_from_raw(days, user_id):
     now_ist = datetime.now(timezone.utc).replace(tzinfo=None) + IST_OFFSET
     first_day = now_ist.date() - timedelta(days=days - 1)
     start_utc = (datetime.combine(first_day, datetime.min.time()) - IST_OFFSET).isoformat(timespec="seconds")
     agg = db.get_activity_stats(start_utc, user_id)
     agg["last_day"] = now_ist.date()
-    return _usage_assemble(days, user_id, first_day, agg, dict(agg["visits"]), "raw", "day", [], "", None)
+    result = _usage_assemble(days, user_id, first_day, agg, dict(agg["visits"]), "raw", "day", [], "", None)
+    result["insights"] = _usage_insights(first_day, now_ist.date(), user_id, None)
+    return result
 
 
 def _usage_from_summaries(range_key, user_id):
@@ -3977,6 +3997,12 @@ def _usage_from_summaries(range_key, user_id):
         first_day = datetime.strptime(earliest, "%Y-%m-%d").date() if earliest else yesterday
     else:
         first_day = today - timedelta(days=back - 1)
+    try:   # a year range on a young system is only as long as the tracking, so it is judged (daily/weekly) by that
+        started = activity_insights.first_tracked_day()
+    except Exception:
+        started = None
+    if started and started > first_day:
+        first_day = started
     first_day = min(first_day, yesterday)
     days = (yesterday - first_day).days + 1
     weekly = days > ACTIVITY_WEEKLY_ABOVE_DAYS
@@ -3994,7 +4020,9 @@ def _usage_from_summaries(range_key, user_id):
             + ("; busiest hours and top cars/searches are not available for a single dealer" if user_id is not None else
                "; top cars and searches are each month's top 50 added together, so approximate")
             + ("; one bar per week" if weekly else "") + ".")
-    return _usage_assemble(days, user_id, first_day, agg, visits_by_day, "summary", "week" if weekly else "day", reduced, note, range_key)
+    result = _usage_assemble(days, user_id, first_day, agg, visits_by_day, "summary", "week" if weekly else "day", reduced, note, range_key)
+    result["insights"] = _usage_insights(first_day, yesterday, user_id, range_key)
+    return result
 
 
 @app.route("/admin/user_activity_stats")

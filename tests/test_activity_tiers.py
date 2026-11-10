@@ -249,7 +249,7 @@ class Endpoint(unittest.TestCase):
     def test_raw_and_summary_routes_agree_on_a_finished_range(self):
         uid = support._state["users"]["dealer"]["id"]
         now = datetime.utcnow()
-        rows = synthetic_rows(now - timedelta(days=40), 38, [uid], per_day=20, seed=9)
+        rows = synthetic_rows(now - timedelta(days=140), 138, [uid], per_day=8, seed=9)
         insert_rows([r for r in rows if r[1] < (now - timedelta(days=2)).isoformat(timespec="seconds")])
         tiers.ensure_summaries()
         raw = self.admin.get("/admin/user_activity_stats?days=90").get_json()
@@ -268,8 +268,13 @@ class Endpoint(unittest.TestCase):
                 self.assertEqual((d["actions"], d["visits"]), tuple(weeks[d["date"]]), d["date"])
                 checked += 1
         self.assertGreaterEqual(checked, 3)
-        one_year_days = self.admin.get("/admin/user_activity_stats?range=all").get_json()
-        self.assertEqual(one_year_days["granularity"], "day")      # short history: still one bar per day
+        self.app_module.ACTIVITY_WEEKLY_ABOVE_DAYS = 100000          # ask for one bar per day for the day-by-day comparison
+        self.app_module._usage_cache_clear()
+        try:
+            one_year_days = self.admin.get("/admin/user_activity_stats?range=all").get_json()
+        finally:
+            self.app_module.ACTIVITY_WEEKLY_ABOVE_DAYS = 120
+        self.assertEqual(one_year_days["granularity"], "day")
         daily = {d["date"]: d for d in one_year_days["daily"]}
         for d in raw["daily"][:-1]:
             if d["date"] in daily:

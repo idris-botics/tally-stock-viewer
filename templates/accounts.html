@@ -339,6 +339,132 @@
             justify-content: center;
         }
 
+        .usage-card .cmp {
+            margin-top: 2px;
+            font-size: 11px;
+            color: var(--muted);
+        }
+
+        .usage-card .cmp.up { color: #15803d; }
+        .usage-card .cmp.down { color: #b91c1c; }
+
+        .usage-sub {
+            margin: 0 0 8px;
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        .heat-grid {
+            display: grid;
+            grid-template-columns: 34px repeat(24, minmax(0, 1fr));
+            gap: 2px;
+            font-size: 11px;
+            color: var(--muted);
+        }
+
+        .heat-grid .hd { text-align: left; white-space: nowrap; overflow: visible; }
+        .heat-grid .dn { display: flex; align-items: center; }
+
+        .heat-grid .cell {
+            aspect-ratio: 1 / 1;
+            min-height: 11px;
+            border-radius: 3px;
+            background: #eef2f8;
+            border: 0;
+            padding: 0;
+            cursor: pointer;
+        }
+
+        .heat-readout {
+            margin-top: 8px;
+            min-height: 18px;
+            font-size: 13px;
+        }
+
+        .heat-legend {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin-top: 6px;
+            font-size: 11px;
+            color: var(--muted);
+        }
+
+        .heat-legend i {
+            width: 14px;
+            height: 10px;
+            border-radius: 2px;
+            display: inline-block;
+        }
+
+        .wk-table {
+            width: 100%;
+            min-width: 0;            /* the page-wide table rule has min-width: 960px */
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        .wk-table th, .wk-table td {
+            padding: 5px 6px;
+            text-align: right;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .wk-table th:first-child, .wk-table td:first-child { text-align: left; }
+        .wk-table tr.sunday td { font-weight: 700; background: #fff7e6; }
+
+        .usage-callout {
+            margin: 8px 0 0;
+            font-size: 13px;
+        }
+
+        .dormant-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+            gap: 6px;
+        }
+
+        .dormant-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 10px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: #fff;
+            text-align: left;
+            font-size: 13px;
+            cursor: pointer;
+            color: var(--text);
+        }
+
+        .dormant-item small { color: var(--muted); white-space: nowrap; }
+
+        .usage-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            background: #e8f0fe;
+            font-size: 13px;
+        }
+
+        .usage-chip button { padding: 2px 8px; }
+
+        @media (max-width: 640px) {
+            /* a dealer with a very long name used to stretch the whole page sideways */
+            .usage-controls label { flex: 1 1 100%; min-width: 0; }
+            .usage-controls select { flex: 1 1 150px; min-width: 0; max-width: 100%; }
+            .usage-controls .secondary { flex: 1 1 auto; }
+            .usage-canvas-wrap { height: 230px; }
+            .usage-card .num { font-size: 21px; }
+            .heat-grid { gap: 1px; grid-template-columns: 30px repeat(24, minmax(0, 1fr)); }
+            .heat-grid .cell { min-height: 9px; border-radius: 2px; }
+            .wk-table th, .wk-table td { padding: 5px 3px; font-size: 12px; }
+        }
+
         .usage-note {
             margin: 0 0 12px;
             padding: 8px 10px;
@@ -496,18 +622,24 @@
             <label>Dealer
                 <select id="usageUser" onchange="loadUsage()"><option value="">All dealers</option></select>
             </label>
+            <button type="button" class="secondary" id="usageCsvBtn" onclick="downloadUsageCsv()" title="Download the numbers on screen as a CSV file">Download CSV</button>
             <button type="button" class="secondary" onclick="closeUsagePanel()">Close</button>
         </div>
+        <div id="usageDealerChip" style="display:none; margin:0 0 12px;"></div>
         <div id="usageState" class="usage-state"></div>
         <div id="usageContent" style="display:none;">
             <p class="usage-note" id="usageNote" style="display:none;"></p>
             <div class="usage-cards" id="usageCards"></div>
             <div class="usage-charts">
                 <div class="usage-chart-box wide"><h3>Daily activity</h3><div class="usage-canvas-wrap"><canvas id="chartDaily" role="img" aria-label="Daily active users, visits and actions"></canvas></div></div>
+                <div class="usage-chart-box wide" id="boxHeatmap"><h3>When dealers use it (weekday &times; hour, IST)</h3><p class="usage-sub" id="heatSub"></p><div id="heatmapWrap"></div><div class="heat-readout" id="heatReadout" aria-live="polite">Tap a square to see its count.</div><div class="heat-legend"><span>fewer</span><i style="background:rgba(31,111,235,0.15)"></i><i style="background:rgba(31,111,235,0.4)"></i><i style="background:rgba(31,111,235,0.7)"></i><i style="background:rgba(31,111,235,1)"></i><span>more actions</span></div></div>
+                <div class="usage-chart-box" id="boxWeekdays"><h3>Sunday vs other days</h3><p class="usage-sub" id="weekdaysSub"></p><div id="weekdaysWrap"></div><p class="usage-callout" id="sundayCallout"></p></div>
+                <div class="usage-chart-box" id="boxNewReturning"><h3>New vs returning dealers, per week</h3><div class="usage-canvas-wrap"><canvas id="chartNewReturning" role="img" aria-label="New and returning dealers per week"></canvas></div><p class="usage-sub" id="newReturningSub" style="margin-top:8px;"></p></div>
+                <div class="usage-chart-box wide" id="boxDormant"><h3>Dormant dealers (no activity for 14+ days)</h3><div id="dormantWrap"></div></div>
                 <div class="usage-chart-box"><h3>Busiest hours (IST)</h3><div class="usage-canvas-wrap"><canvas id="chartHourly" role="img" aria-label="Actions by hour of day"></canvas></div></div>
                 <div class="usage-chart-box"><h3>Top cars opened</h3><div class="usage-canvas-wrap"><canvas id="chartCars" role="img" aria-label="Most opened cars"></canvas></div></div>
                 <div class="usage-chart-box"><h3>Top searches</h3><div class="usage-canvas-wrap"><canvas id="chartSearches" role="img" aria-label="Most frequent searches"></canvas></div></div>
-                <div class="usage-chart-box wide"><h3>Activity by dealer</h3><div class="usage-canvas-wrap" id="usersWrap"><canvas id="chartUsers" role="img" aria-label="Actions per dealer by type"></canvas></div></div>
+                <div class="usage-chart-box wide"><h3>Activity by dealer</h3><div class="usage-canvas-wrap" id="usersWrap"><canvas id="chartUsers" role="img" aria-label="Actions per dealer by type"></canvas></div><p class="usage-sub" id="usersIdleNote" style="margin-top:8px;"></p></div>
             </div>
             <p class="muted" id="usageFootnote" style="margin:12px 0 0; font-size:13px;"></p>
         </div>
@@ -686,6 +818,10 @@ function shortDate(iso) {
     return `${d} ${months[m - 1]}`;
 }
 
+function fullDate(iso) {
+    return `${shortDate(iso)} ${iso.slice(0, 4)}`;
+}
+
 function hourLabel(h) {
     return `${h % 12 || 12}${h < 12 ? "am" : "pm"}`;
 }
@@ -770,26 +906,232 @@ function horizontalBar(canvasId, labels, values, color, emptyText) {
     });
 }
 
+// "+12% vs the previous 30 days (85)" under a summary number; plain numbers (no percentage) when the
+// previous period is only partly covered by tracking, nothing when there is nothing to compare.
+function compareHtml(current, prev, key) {
+    if (!prev) return "";
+    const before = prev[key];
+    const span = `${prev.days} day${prev.days === 1 ? "" : "s"}`;
+    if (prev.days_with_data < prev.days) {
+        return `<div class="cmp">previous ${span}: ${before} (only ${prev.days_with_data} tracked)</div>`;
+    }
+    if (!before) return `<div class="cmp">previous ${span}: 0</div>`;
+    const pct = Math.round((current - before) / before * 100);
+    const cls = pct > 0 ? "up" : (pct < 0 ? "down" : "");
+    const arrow = pct > 0 ? "&#9650; +" : (pct < 0 ? "&#9660; " : "= ");
+    return `<div class="cmp ${cls}">${arrow}${pct}% vs previous ${span} (${before})</div>`;
+}
+
+const WEEKDAY_SHORT = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+function showBox(id, visible) {
+    document.getElementById(id).style.display = visible ? "" : "none";
+}
+
+function renderHeatmap(ins) {
+    const grid = ins.heatmap;
+    showBox("boxHeatmap", !!grid);
+    if (!grid) return;
+    const max = Math.max(1, ...grid.flat());
+    let html = `<div class="heat-grid" role="img" aria-label="Actions by weekday and hour, IST">` + `<span></span>`;
+    for (let h = 0; h < 24; h++) {
+        html += h % 3 === 0 ? `<span class="hd" style="grid-column: span 3">${hourLabel(h)}</span>` : "";
+    }
+    grid.forEach((row, w) => {
+        html += `<span class="dn">${WEEKDAY_SHORT[w]}</span>`;
+        row.forEach((n, h) => {
+            const bg = n ? `rgba(31,111,235,${(0.15 + 0.85 * n / max).toFixed(2)})` : "";
+            html += `<button type="button" class="cell" data-w="${w}" data-h="${h}" data-n="${n}" aria-label="${WEEKDAY_SHORT[w]} ${hourLabel(h)}: ${n} actions" ${bg ? `style="background:${bg}"` : ""}></button>`;
+        });
+    });
+    html += `</div>`;
+    const wrap = document.getElementById("heatmapWrap");
+    wrap.innerHTML = html;
+    const readout = document.getElementById("heatReadout");
+    wrap.onclick = wrap.onmouseover = (event) => {
+        const cell = event.target.closest(".cell");
+        if (!cell) return;
+        const n = Number(cell.dataset.n);
+        readout.textContent = `${WEEKDAY_SHORT[cell.dataset.w]} ${hourLabel(Number(cell.dataset.h))}: ${n} action${n === 1 ? "" : "s"}`;
+    };
+    document.getElementById("heatSub").textContent =
+        `Dealers only, finished days ${fullDate(ins.first_day)} to ${fullDate(ins.last_day)} (today is not included).`;
+}
+
+function renderWeekdays(ins) {
+    const wk = ins.weekdays;
+    showBox("boxWeekdays", !!wk);
+    if (!wk) return;
+    document.getElementById("weekdaysSub").textContent = "Average per day, counting days with no activity as zero.";
+    document.getElementById("weekdaysWrap").innerHTML = `<table class="wk-table"><thead><tr><th>Day</th><th>Actions</th><th>Dealers</th><th>Visits</th><th>Days</th></tr></thead><tbody>` +
+        wk.map((w, i) => `<tr class="${i === 6 ? "sunday" : ""}"><td>${w.weekday.slice(0, 3)}</td><td>${w.avg_actions ?? "-"}</td><td>${w.avg_dealers ?? "-"}</td><td>${w.avg_visits ?? "-"}</td><td>${w.days}</td></tr>`).join("") +
+        `</tbody></table>`;
+    const sun = wk[6];
+    const others = wk.slice(0, 6);
+    const days = others.reduce((a, w) => a + w.days, 0);
+    const callout = document.getElementById("sundayCallout");
+    if (!sun.days || !days) {
+        callout.textContent = "";
+        return;
+    }
+    const avg = (key) => (others.reduce((a, w) => a + w[key], 0) / days).toFixed(1);
+    callout.textContent = `Sundays: ${sun.avg_actions} actions and ${sun.avg_dealers} dealers a day (${sun.days} Sunday${sun.days === 1 ? "" : "s"}). ` +
+        `Monday to Saturday: ${avg("actions")} actions and ${(others.reduce((a, w) => a + w.avg_dealers * w.days, 0) / days).toFixed(1)} dealers a day.`;
+}
+
+function renderNewReturning(ins) {
+    const series = ins.new_returning;
+    showBox("boxNewReturning", !!series);
+    if (!series) return;
+    usageCharts.chartNewReturning = new Chart(document.getElementById("chartNewReturning"), {
+        type: "bar",
+        data: {
+            labels: series.map(w => shortDate(w.week)),
+            datasets: [
+                { label: "New", backgroundColor: "#f59e0b", data: series.map(w => w.new) },
+                { label: "Returning", backgroundColor: "#1f6feb", data: series.map(w => w.returning) },
+            ],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { position: "bottom" } },
+            scales: {
+                x: { stacked: true, ticks: { autoSkip: true, maxRotation: 0, maxTicksLimit: 8 } },
+                y: { stacked: true, beginAtZero: true, ticks: { precision: 0 } },
+            },
+        },
+    });
+    document.getElementById("newReturningSub").textContent =
+        "Weeks start Monday. New = first time seen since tracking began (Oct 9), so the first week counts everyone as new.";
+}
+
+function renderDormant(ins) {
+    const d = ins.dormant;
+    showBox("boxDormant", !!d);
+    if (!d) return;
+    const wrap = document.getElementById("dormantWrap");
+    const rows = d.dormant.map(r =>
+        `<button type="button" class="dormant-item" data-user="${Number(r.user_id)}"><span>${escapeHtml(r.username)}</span><small>${shortDate(r.last_active)} &middot; ${r.days_ago} days ago</small></button>`).join("");
+    const never = d.never_active.length
+        ? `<details style="margin-top:10px;"><summary>${d.never_total} dealer${d.never_total === 1 ? "" : "s"} never recorded any activity</summary><div class="dormant-list" style="margin-top:8px;">` +
+          d.never_active.map(r => `<span class="dormant-item" style="cursor:default;">${escapeHtml(r.username)}</span>`).join("") + `</div></details>`
+        : "";
+    wrap.innerHTML = (rows
+        ? `<p class="usage-sub">${d.dormant_total} dealer${d.dormant_total === 1 ? "" : "s"} used it before but not in the last ${d.threshold_days} days (most recently lapsed first). ${d.recent} active more recently. Tap a name to see just that dealer.</p><div class="dormant-list">${rows}</div>`
+        : `<p class="usage-sub">No dealer has been away for ${d.threshold_days}+ days.</p>`) + never;
+    wrap.onclick = (event) => {
+        const item = event.target.closest("button[data-user]");
+        if (item) selectUsageDealer(item.dataset.user);
+    };
+}
+
+// Click a dealer (in the by-dealer chart or the dormant list) to see the charts for just them.
+function selectUsageDealer(userId) {
+    const select = document.getElementById("usageUser");
+    if (![...select.options].some(o => o.value === String(userId))) return;
+    select.value = String(userId);
+    loadUsage();
+    document.getElementById("usagePanel").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function renderDealerChip(data) {
+    const chip = document.getElementById("usageDealerChip");
+    const select = document.getElementById("usageUser");
+    if (!select.value) {
+        chip.style.display = "none";
+        return;
+    }
+    const name = select.options[select.selectedIndex].textContent;
+    chip.style.display = "block";
+    chip.innerHTML = `<span class="usage-chip">Showing only <strong>${escapeHtml(name)}</strong> <button type="button" class="secondary" id="chipAll">All dealers</button> <button type="button" class="secondary" id="chipVisits" data-user-id="${Number(select.value)}" data-username="${escapeHtml(name)}">Recent visits</button></span>`;
+    document.getElementById("chipAll").onclick = () => { select.value = ""; loadUsage(); };
+    document.getElementById("chipVisits").onclick = (event) => showActivity(event.currentTarget);
+}
+
+// CSV of exactly what is on screen (already-aggregated numbers; nothing else is fetched).
+function csvCell(value) {
+    let text = value === null || value === undefined ? "" : String(value);
+    if (/^[=+\-@\t\r]/.test(text)) text = "'" + text;       // stop spreadsheets treating text as a formula
+    return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function usageCsvText(data) {
+    const rows = [];
+    const add = (...cells) => rows.push(cells.map(csvCell).join(","));
+    const select = document.getElementById("usageUser");
+    const who = select.value ? select.options[select.selectedIndex].textContent : "All dealers";
+    const ins = data.insights || {};
+    add("Usage Charts export"); add("Dealer", who);
+    add("Range", data.range ? data.range : `last ${data.days} days`, "source", data.source);
+    if (data.note) add("Note", data.note);
+    rows.push("");
+    add("Summary", "value"); const s = data.summary;
+    add("Actions", s.total_actions); add("Active dealers", s.active_users); add("Visits", s.visits);
+    add("Busiest hour (IST)", s.peak_hour_ist === null ? "" : hourLabel(s.peak_hour_ist));
+    if (ins.previous) { add("Previous period actions", ins.previous.total_actions); add("Previous period active dealers", ins.previous.active_users); add("Previous period visits", ins.previous.visits); add("Previous period days tracked", `${ins.previous.days_with_data} of ${ins.previous.days}`); }
+    rows.push("");
+    add(data.granularity === "week" ? "Week starting" : "Date", "Actions", "Visits", "Active dealers");
+    data.daily.forEach(d => add(d.date, d.actions, d.visits, d.active_users));
+    if (ins.weekdays) { rows.push(""); add("Weekday", "Avg actions/day", "Avg dealers/day", "Avg visits/day", "Days counted"); ins.weekdays.forEach(w => add(w.weekday, w.avg_actions, w.avg_dealers, w.avg_visits, w.days)); }
+    if (ins.heatmap) { rows.push(""); add("Weekday x hour (IST)", ...Array.from({ length: 24 }, (_, h) => hourLabel(h))); ins.heatmap.forEach((r, i) => add(WEEKDAY_SHORT[i], ...r)); }
+    if (data.hourly) { rows.push(""); add("Hour (IST)", "Actions"); data.hourly.forEach((n, h) => add(hourLabel(h), n)); }
+    if (ins.new_returning) { rows.push(""); add("Week starting", "New dealers", "Returning dealers"); ins.new_returning.forEach(w => add(w.week, w.new, w.returning)); }
+    rows.push(""); add("Dealer", "Total", ...USAGE_GROUPS.map(g => g.label));
+    data.per_user.forEach(u => add(u.username, u.total, ...USAGE_GROUPS.map(g => usageGroupCount(u.by_action, g))));
+    if (data.top_cars) { rows.push(""); add("Top cars", "Opens"); data.top_cars.forEach(c => add(c.name, c.count)); }
+    if (data.top_searches) { rows.push(""); add("Top searches", "Count"); data.top_searches.forEach(c => add(c.query, c.count)); }
+    if (ins.dormant) { rows.push(""); add("Dormant dealer", "Last active", "Days ago"); ins.dormant.dormant.forEach(r => add(r.username, r.last_active, r.days_ago)); add("Never active dealers", ins.dormant.never_total); }
+    return "\ufeff" + rows.join("\r\n") + "\r\n";
+}
+
+function downloadUsageCsv() {
+    const data = window.lastUsageData;
+    if (!data) return;
+    const blob = new Blob([usageCsvText(data)], { type: "text/csv;charset=utf-8" });
+    const select = document.getElementById("usageUser");
+    const who = select.value ? "dealer" + select.value : "all";
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `usage_${data.range || data.days + "d"}_${who}_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
 function renderUsage(data) {
     destroyUsageCharts();
     Chart.defaults.color = "#5d6b82";
     Chart.defaults.font.family = "Arial, sans-serif";
     const s = data.summary;
 
-    document.getElementById("usageCards").innerHTML = [
-        [s.total_actions, "Actions"],
-        [`${s.active_users} / ${s.total_users}`, "Active dealers"],
-        [s.visits, "Visits"],
-        [s.peak_hour_ist === null ? "-" : hourLabel(s.peak_hour_ist), "Busiest hour (IST)"],
-    ].map(([n, l]) => `<div class="usage-card"><div class="num">${escapeHtml(String(n))}</div><div class="lbl">${l}</div></div>`).join("");
+    window.lastUsageData = data;
+    const ins = data.insights || {};
+    const prev = ins.previous;
+    const cards = [
+        [s.total_actions, "Actions", compareHtml(s.total_actions, prev, "total_actions")],
+        [`${s.active_users} / ${s.total_users}`, "Active dealers", compareHtml(s.active_users, prev, "active_users")],
+        [s.visits, "Visits", compareHtml(s.visits, prev, "visits")],
+        [s.peak_hour_ist === null ? "-" : hourLabel(s.peak_hour_ist), "Busiest hour (IST)", ""],
+    ];
+    if (ins.last_active) {
+        const la = ins.last_active;
+        cards.push([la.date ? shortDate(la.date) : "Never", "Last active", la.days_ago === null ? "" : `<div class="cmp">${la.days_ago === 0 ? "today" : la.days_ago + " day" + (la.days_ago === 1 ? "" : "s") + " ago"}</div>`]);
+    }
+    if (ins.admin_actions && !data.user_id) {
+        cards.push([ins.admin_actions, "Admin actions (left out)", `<div class="cmp">your own testing, not dealers</div>`]);
+    }
+    document.getElementById("usageCards").innerHTML = cards
+        .map(([n, l, extra]) => `<div class="usage-card"><div class="num">${escapeHtml(String(n))}</div><div class="lbl">${l}</div>${extra || ""}</div>`).join("");
 
     usageCharts.chartDaily = new Chart(document.getElementById("chartDaily"), {
         data: {
             labels: data.daily.map(d => (data.granularity === "week" ? "Wk " : "") + shortDate(d.date)),
             datasets: [
                 { type: "bar", label: "Actions", data: data.daily.map(d => d.actions), backgroundColor: "rgba(31,111,235,0.25)", borderRadius: 3, yAxisID: "y" },
-                { type: "line", label: "Visits", data: data.daily.map(d => d.visits), borderColor: "#14b8a6", backgroundColor: "#14b8a6", tension: 0.25, pointRadius: 3, yAxisID: "y1" },
-                { type: "line", label: "Active dealers", data: data.daily.map(d => d.active_users), borderColor: "#f59e0b", backgroundColor: "#f59e0b", tension: 0.25, pointRadius: 3, yAxisID: "y2" },
+                { type: "line", label: "Visits", data: data.daily.map(d => d.visits), borderColor: "#14b8a6", backgroundColor: "#14b8a6", tension: 0.25, borderWidth: 2, pointRadius: data.daily.length > 31 ? 0 : 3, yAxisID: "y1" },
+                { type: "line", label: "Active dealers", data: data.daily.map(d => d.active_users), borderColor: "#f59e0b", backgroundColor: "#f59e0b", tension: 0.25, borderWidth: 2, pointRadius: data.daily.length > 31 ? 0 : 3, yAxisID: "y2" },
             ],
         },
         options: {
@@ -828,7 +1170,11 @@ function renderUsage(data) {
     setPanelUnavailable("chartCars", !data.top_cars);
     setPanelUnavailable("chartSearches", !data.top_searches);
 
-    const users = data.per_user;
+    const users = data.per_user.filter(u => u.total > 0);
+    const idleCount = data.per_user.length - users.length;
+    document.getElementById("usersIdleNote").textContent = idleCount
+        ? `${idleCount} more dealer${idleCount === 1 ? "" : "s"} had no activity in this range${data.insights && data.insights.dormant ? " (see the dormant list above)" : ""}.`
+        : "";
     document.getElementById("usersWrap").style.height = `${Math.max(180, users.length * 30 + 80)}px`;
     usageCharts.chartUsers = new Chart(document.getElementById("chartUsers"), {
         type: "bar",
@@ -844,6 +1190,12 @@ function renderUsage(data) {
             indexAxis: "y",
             responsive: true,
             maintainAspectRatio: false,
+            onClick(event, elements) {
+                if (elements.length) selectUsageDealer(users[elements[0].index].user_id);
+            },
+            onHover(event, elements) {
+                event.native.target.style.cursor = elements.length ? "pointer" : "default";
+            },
             plugins: {
                 legend: { position: "bottom" },
                 tooltip: {
@@ -862,6 +1214,12 @@ function renderUsage(data) {
         },
     });
 
+    renderHeatmap(ins);
+    renderWeekdays(ins);
+    renderNewReturning(ins);
+    renderDormant(ins);
+    renderDealerChip(data);
+
     const noteEl = document.getElementById("usageNote");
     noteEl.textContent = data.note || "";
     noteEl.style.display = data.note ? "block" : "none";
@@ -869,7 +1227,7 @@ function renderUsage(data) {
         ? `the ${data.days} finished days of this range`
         : `the last ${data.days} day${data.days === 1 ? "" : "s"}`;
     document.getElementById("usageFootnote").textContent =
-        `Based on logged actions (opens, searches, shares, copies, reports, logins) over ${span}. ` +
+        `Based on logged actions (opens, searches, shares, copies, reports, logins) over ${span}; the current period includes today so far. ` +
         `Older history is archived in Google Drive (folder "SuperSeatings Activity Archive") and kept as permanent daily summaries.`;
 }
 
