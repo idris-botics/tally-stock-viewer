@@ -934,6 +934,7 @@ def inject_session_context():
     except Exception:
         versions = {}
     return {
+        "app_build_id": APP_BUILD_ID,
         "page_data_version": versions.get("data_version", ""),
         "page_admin_version": versions.get("admin_version", "") if role == "admin" else "",
         "current_role": role,
@@ -2400,6 +2401,38 @@ def _compute_feeder_fingerprint():
         digest.update(_canonical_file_digest(path).encode("ascii"))
         digest.update(b"|")
     return digest.hexdigest()
+
+
+def compute_app_build_id(environ=None, root=None):
+    """ONE stable id per deployed CODE (never per restart, never per data).
+
+    Open pages compare it with the id embedded when they were served (see static/data_sync.js) to notice
+    that the app was updated while the tab stayed open. On Render it is the deployed git commit
+    (RENDER_GIT_COMMIT). Anywhere else it is a hash of the templates/ and static/ files (path + content,
+    line endings normalised), so the same checkout always gives the same id. Neither reads data/."""
+    environ = os.environ if environ is None else environ
+    commit = (environ.get("RENDER_GIT_COMMIT") or "").strip()
+    if commit:
+        return commit[:12]
+    root = root or os.path.dirname(os.path.abspath(__file__))
+    digest = hashlib.sha1()
+    for folder in ("templates", "static"):
+        base = os.path.join(root, folder)
+        for current, dirs, files in os.walk(base):
+            dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+            for name in sorted(files):
+                path = os.path.join(current, name)
+                rel = os.path.relpath(path, root).replace(os.sep, "/")
+                with open(path, "rb") as handle:
+                    content = handle.read().replace(b"\r\n", b"\n")
+                digest.update(rel.encode("utf-8") + b"\0" + content + b"\0")
+    return "local-" + digest.hexdigest()[:12]
+
+
+try:
+    APP_BUILD_ID = compute_app_build_id()
+except Exception:
+    APP_BUILD_ID = ""     # empty = "unknown": pages ignore it, so a failure here can never trigger a reload
 
 
 def get_data_versions():
@@ -6021,6 +6054,9 @@ def last_update():
         versions = get_data_versions()
         if _current_role() != "admin":
             versions.pop("admin_version", None)
+        # Which deployed code is answering; rides on this same poll so a tab left open for days can notice
+        # it is running old page code (build_id is not data: it only changes when new code is deployed).
+        versions["build_id"] = APP_BUILD_ID
 
         if Config.DISABLE_TALLY_SCHEDULING:
             if FEEDER_LAST_SEEN_AT is None:

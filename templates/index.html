@@ -5537,6 +5537,29 @@ function isViewBusyForRefresh() {
     return Boolean(active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT"));
 }
 
+// True while a share is running or waiting for the "Share next N images" tap -- a reload would lose it.
+function isShareActive() {
+    return Boolean(shareInProgress || batchContinuePending);
+}
+
+// "The app was updated" (static/data_sync.js) may reload this page by itself ONLY when it is idle: no
+// selection mode, no share, no open modal/menu/dropdown. (data_sync.js also refuses while any text field
+// holds typed text, e.g. the car search box.) Deliberately NOT isViewBusyForRefresh(): that one also counts
+// a merely focused, empty field as busy, which on a desktop could block the reload forever.
+function isIdleForAutoReload() {
+    if (selectMode || categoryAssignMode || isShareActive()) {
+        return false;
+    }
+    if (document.querySelector(".modal.open") || document.querySelector(".select2-container--open")) {
+        return false;
+    }
+    // The customer notice popup is a blocking dialog too (and would simply show again after a reload).
+    if (document.getElementById("noticePopup")) {
+        return false;
+    }
+    return !isMoreMenuOpen();
+}
+
 // In-place refresh: re-fetch the open car's designs and swap the list
 // without the skeleton flash or a scroll jump, then the category list.
 async function refreshOpenViewInPlace() {
@@ -5984,6 +6007,9 @@ window.addEventListener("DOMContentLoaded", () => {
         version: {{ page_data_version|tojson }},
         adminVersion: {{ page_admin_version|tojson }},
         watch: ["data"],
+        buildId: {{ app_build_id|tojson }},
+        canAutoReload: isIdleForAutoReload,
+        isSharing: isShareActive,
         intervalMs: isAdmin ? 30000 : 60000,
         isBusy: isViewBusyForRefresh,
         refresh: refreshOpenViewInPlace,

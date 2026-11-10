@@ -104,7 +104,120 @@
         }
     }
 
+    // ---- "The app was updated" -- stale PAGE CODE in a tab left open for days ----
+    // The data notice above only refreshes data; it never re-fetches index.html or the JS. The server puts
+    // its build id (the deployed commit) into every page it serves (opts.buildId) and into /last_update
+    // (build_id, the same poll -- no extra request). A different id means this tab runs old code: show a
+    // banner, and reload by itself only when the page is idle (opts.canAutoReload, plus no typed text in
+    // any visible field). A tap on the banner reloads unless a share is running (opts.isSharing).
+    const RELOAD_GUARD_KEY = "appBuildAutoReloadTarget";
+    let buildBannerEl = null;
+    let buildBannerButton = null;
+    let buildFlashTimer = null;
+
+    function ensureBuildBanner() {
+        if (buildBannerEl) {
+            return;
+        }
+        const style = document.createElement("style");
+        style.textContent =
+            "#appBuildBanner{position:fixed;left:50%;top:12px;transform:translateX(-50%);z-index:2147483001;" +
+            "max-width:calc(100vw - 24px);display:none}" +
+            "#appBuildBanner button{font:600 14px Arial,sans-serif;background:#b45309;color:#fff;border:0;" +
+            "border-radius:999px;padding:10px 18px;box-shadow:0 4px 14px rgba(0,0,0,.25);cursor:pointer}";
+        document.head.appendChild(style);
+        buildBannerEl = document.createElement("div");
+        buildBannerEl.id = "appBuildBanner";
+        buildBannerEl.setAttribute("role", "status");
+        buildBannerEl.setAttribute("aria-live", "polite");
+        buildBannerButton = document.createElement("button");
+        buildBannerButton.type = "button";
+        buildBannerButton.textContent = "The app was updated. Tap to reload.";
+        buildBannerButton.addEventListener("click", onBuildBannerClick);
+        buildBannerEl.appendChild(buildBannerButton);
+        document.body.appendChild(buildBannerEl);
+    }
+
+    function onBuildBannerClick() {
+        let sharing = false;
+        try {
+            sharing = Boolean(opts.isSharing && opts.isSharing());
+        } catch (error) {
+            sharing = false;
+        }
+        if (sharing) {
+            buildBannerButton.textContent = "Finish sharing, then tap again";
+            clearTimeout(buildFlashTimer);
+            buildFlashTimer = setTimeout(() => {
+                buildFlashTimer = null;
+                buildBannerButton.textContent = "The app was updated. Tap to reload.";
+            }, 2500);
+            return;
+        }
+        window.location.reload();
+    }
+
+    // Visible, text-like fields that hold something the person typed (not a server-provided default).
+    function hasTypedText() {
+        const skip = ["button", "submit", "reset", "checkbox", "radio", "file", "hidden", "image", "range", "color"];
+        const fields = document.querySelectorAll("input, textarea");
+        for (let i = 0; i < fields.length; i += 1) {
+            const field = fields[i];
+            if (skip.indexOf((field.type || "").toLowerCase()) !== -1 || !field.getClientRects().length) {
+                continue;
+            }
+            if (field.value.trim() !== "" && field.value !== field.defaultValue) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function maybeAutoReload(serverBuild) {
+        if (!opts.canAutoReload) {
+            return;     // this page only shows the banner
+        }
+        let idle = false;
+        try {
+            idle = Boolean(opts.canAutoReload()) && !hasTypedText();
+        } catch (error) {
+            idle = false;
+        }
+        if (!idle) {
+            return;
+        }
+        // One automatic reload per target build: if the reloaded page still reports a different id (an old
+        // cached page, two servers), stop at the banner instead of looping. No storage = no guard = no auto.
+        try {
+            if (window.sessionStorage.getItem(RELOAD_GUARD_KEY) === serverBuild) {
+                return;
+            }
+            window.sessionStorage.setItem(RELOAD_GUARD_KEY, serverBuild);
+        } catch (error) {
+            return;
+        }
+        window.location.reload();
+    }
+
+    function noteBuild(serverBuild) {
+        if (!opts || !opts.buildId || typeof serverBuild !== "string" || !serverBuild) {
+            return;     // unknown on either side: never treat it as "updated"
+        }
+        if (serverBuild === opts.buildId) {
+            if (buildBannerEl) {
+                buildBannerEl.style.display = "none";
+            }
+            return;
+        }
+        ensureBuildBanner();
+        buildBannerEl.style.display = "block";
+        maybeAutoReload(serverBuild);
+    }
+
     function observe(data) {
+        if (data && opts) {
+            noteBuild(data.build_id);
+        }
         if (!opts || !data || !data.data_version) {
             return;
         }
@@ -171,7 +284,10 @@
     window.DataSync = {
         // opts: { version, adminVersion, watch: ["data"] | ["admin"], intervalMs, isBusy(), refresh(),
         //         poll() (optional: replaces the default /last_update fetch --
-        //         must call DataSync.observe(json) itself), label }
+        //         must call DataSync.observe(json) itself), label,
+        //         buildId (the server's app build id when this page was served),
+        //         canAutoReload() (optional: true only when the page is idle; without it the "app was
+        //         updated" banner never reloads by itself), isSharing() (optional) }
         init(options) {
             opts = options;
             applied = { data: options.version || "", admin: options.adminVersion || "" };

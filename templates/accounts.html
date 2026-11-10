@@ -1529,6 +1529,7 @@ window.addEventListener("DOMContentLoaded", () => {
         version: {{ page_data_version|tojson }},
         adminVersion: {{ page_admin_version|tojson }},
         watch: ["admin"],
+        buildId: {{ app_build_id|tojson }},
         intervalMs: 30000,
         isBusy: () => {
             const active = document.activeElement;
