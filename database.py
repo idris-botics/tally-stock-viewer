@@ -670,6 +670,55 @@ def _ensure_users_schema(conn):
         "CREATE INDEX IF NOT EXISTS idx_user_activity_user_at ON user_activity (user_id, at_utc)"
     )
 
+    # Permanent, tiny summaries of user_activity (see activity_tiers.py). They
+    # outlive the raw rows, which are archived to Drive and then removed once
+    # their whole month is past the raw window. No FOREIGN KEY on purpose: a
+    # deleted dealer's history stays in the totals.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS activity_daily (
+            day_ist TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            count INTEGER NOT NULL,
+            visits INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (day_ist, user_id, action)
+        ) WITHOUT ROWID
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS activity_hourly (
+            day_ist TEXT NOT NULL,
+            hour_ist INTEGER NOT NULL,
+            count INTEGER NOT NULL,
+            PRIMARY KEY (day_ist, hour_ist)
+        ) WITHOUT ROWID
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS activity_top_monthly (
+            month TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            label TEXT NOT NULL,
+            count INTEGER NOT NULL,
+            PRIMARY KEY (month, kind, label)
+        ) WITHOUT ROWID
+        """
+    )
+    # One row per finished IST day ('d:2026-10-09') / month ('m:2026-10'). Needed
+    # because "a day with no activity" has no rows in the tables above, and
+    # because pruning must be able to prove a day's summary exists.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS activity_summary_done (
+            key TEXT PRIMARY KEY,
+            computed_at TEXT NOT NULL
+        ) WITHOUT ROWID
+        """
+    )
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS account_logs (
@@ -2075,14 +2124,39 @@ def get_recent_user_activity(user_id, limit=50):
     return {"user": _row_to_dict(user), "rows": [_row_to_dict(r) for r in rows]}
 
 
-def get_activity_stats(start_utc, user_id=None):
-    """Read-only aggregates over user_activity rows with at_utc >= start_utc
-    (naive-UTC ISO). user_id=None means all dealers (role='customer'); else
-    that one user. Bucketing is done in SQL in IST (+330 minutes), so a day
-    boundary is IST midnight. Returns compact aggregates plus the minimal
-    (user_id, at_utc, action) tuples the caller needs for visit grouping;
-    detail text only ever leaves here as the top-10 cars/searches."""
-    ist = "+330 minutes"
+ACTIVITY_VISIT_GAP_MINUTES = 30   # THE visit rule: a gap this long between a user's actions starts a new visit
+IST_SQL = "+330 minutes"
+
+
+def visit_starts_sql(where_sql, group_by_user=False):
+    """SQL (aggregated, parameterised) counting visit STARTS per IST day (and
+    per user when group_by_user). Parameters, in order: lookback_utc,
+    <where_sql args>, count_from_utc, gap_seconds. Rows from lookback_utc
+    (= count_from_utc minus the gap) are read only so the first action in the
+    range knows whether it continues an earlier visit; only starts at or after
+    count_from_utc are counted. Same rule as split_into_visit_groups() in
+    app.py (gap >= N minutes starts a new visit); tests keep them equal."""
+    sel_user = "user_id, " if group_by_user else ""
+    grp = "user_id, d" if group_by_user else "d"
+    return (
+        "WITH s AS (SELECT user_id, at_utc, LAG(at_utc) OVER (PARTITION BY user_id ORDER BY at_utc, id) AS prev "
+        f"FROM user_activity WHERE at_utc >= ? AND {where_sql}) "
+        f"SELECT {sel_user}date(at_utc, '{IST_SQL}') AS d, COUNT(*) AS n FROM s "
+        "WHERE at_utc >= ? AND (prev IS NULL OR "
+        "CAST(strftime('%s', at_utc) AS INTEGER) - CAST(strftime('%s', prev) AS INTEGER) >= ?) "
+        f"GROUP BY {grp}"
+    )
+
+
+def get_activity_stats(start_utc, user_id=None, end_utc=None):
+    """Read-only aggregates over user_activity rows with start_utc <= at_utc
+    (< end_utc when given), naive-UTC ISO. user_id=None means all dealers
+    (role='customer'); else that one user. Bucketing is done in SQL in IST
+    (+330 minutes), so a day boundary is IST midnight. Everything is
+    aggregated in SQL (visits too, with a window function) so memory stays
+    flat however many rows are in range; detail text only ever leaves here as
+    the top-10 cars/searches."""
+    ist = IST_SQL
     if user_id is None:
         scope_sql, scope_args = "u.role = 'customer'", ()
         act_scope, act_args = "user_id IN (SELECT id FROM users WHERE role = 'customer')", ()
@@ -2091,6 +2165,12 @@ def get_activity_stats(start_utc, user_id=None):
         act_scope, act_args = "user_id = ?", (int(user_id),)
     base = f"at_utc >= ? AND {act_scope}"
     base_args = (start_utc,) + act_args
+    if end_utc is not None:
+        base += " AND at_utc < ?"
+        base_args += (end_utc,)
+    lookback = (datetime.fromisoformat(start_utc) - timedelta(minutes=ACTIVITY_VISIT_GAP_MINUTES)).isoformat(timespec="seconds")
+    visit_where = act_scope + (" AND at_utc < ?" if end_utc is not None else "")
+    visit_args = (lookback,) + act_args + ((end_utc,) if end_utc is not None else ()) + (start_utc, ACTIVITY_VISIT_GAP_MINUTES * 60)
     with get_connection() as conn:
         daily = conn.execute(
             f"SELECT date(at_utc, '{ist}') AS d, COUNT(*) AS actions, COUNT(DISTINCT user_id) AS users "
@@ -2103,7 +2183,9 @@ def get_activity_stats(start_utc, user_id=None):
         per_user = conn.execute(
             "SELECT u.id AS user_id, u.username, a.action, COUNT(a.id) AS n "
             "FROM users u LEFT JOIN user_activity a ON a.user_id = u.id AND a.at_utc >= ? "
-            f"WHERE {scope_sql} GROUP BY u.id, a.action", (start_utc,) + scope_args,
+            + ("AND a.at_utc < ? " if end_utc is not None else "")
+            + f"WHERE {scope_sql} GROUP BY u.id, a.action",
+            (start_utc,) + ((end_utc,) if end_utc is not None else ()) + scope_args,
         ).fetchall()
         cars = conn.execute(
             f"SELECT detail, COUNT(*) AS n FROM user_activity WHERE {base} AND action = 'view_car' "
@@ -2113,30 +2195,20 @@ def get_activity_stats(start_utc, user_id=None):
             f"SELECT LOWER(TRIM(detail)) AS q, COUNT(*) AS n FROM user_activity WHERE {base} AND action = 'search' "
             "AND detail IS NOT NULL AND TRIM(detail) != '' GROUP BY q ORDER BY n DESC, q LIMIT 10", base_args,
         ).fetchall()
-        stamps = conn.execute(
-            f"SELECT user_id, at_utc, action FROM user_activity WHERE {base} ORDER BY user_id, at_utc DESC, id DESC",
-            base_args,
-        ).fetchall()
+        visits = conn.execute(visit_starts_sql(visit_where), visit_args).fetchall()
     return {
         "daily": [tuple(r) for r in daily],
         "hours": [tuple(r) for r in hours],
         "per_user": [tuple(r) for r in per_user],
         "cars": [tuple(r) for r in cars],
         "searches": [tuple(r) for r in searches],
-        "stamps": [tuple(r) for r in stamps],
+        "visits": [tuple(r) for r in visits],
     }
 
 
 def user_exists(user_id):
     with get_connection() as conn:
         return conn.execute("SELECT 1 FROM users WHERE id = ?", (int(user_id),)).fetchone() is not None
-
-
-def prune_user_activity(days=60):
-    cutoff = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)).isoformat(timespec="seconds")
-    with get_connection() as conn:
-        cursor = conn.execute("DELETE FROM user_activity WHERE at_utc < ?", (cutoff,))
-        return cursor.rowcount
 
 
 def get_user_by_id(user_id):

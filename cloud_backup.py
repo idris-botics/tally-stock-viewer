@@ -1849,6 +1849,19 @@ def get_next_scheduled_backup_iso():
     return _next_scheduled_run_utc.isoformat() if _next_scheduled_run_utc else None
 
 
+def _archive_activity_after_backup(outcome):
+    """Archives expired user_activity months to their own Drive folder -- only right after a
+    SUCCESSFUL scheduled backup, and only while the caller still holds SYNC_LOCK, so it can
+    never overlap a backup (same "already running" skip as the backup itself). Never raises."""
+    try:
+        if not outcome or (outcome.get("last_run") or {}).get("status") != "success":
+            return
+        import activity_archive
+        activity_archive.run_archive()
+    except Exception as exc:
+        logger.error("Activity archive could not run: %s", type(exc).__name__)
+
+
 def _attempt_scheduled_run():
     """Shared by both scheduling modes (daily-slot and the legacy interval
     fallback): try run_sync(), respecting authorization and SYNC_LOCK,
@@ -1865,7 +1878,8 @@ def _attempt_scheduled_run():
         _record_skipped_run("already_running", message)
     else:
         try:
-            run_sync(triggered_by="schedule")
+            outcome = run_sync(triggered_by="schedule")
+            _archive_activity_after_backup(outcome)
         except Exception:
             logger.exception("Scheduled cloud backup run raised unexpectedly")
         finally:

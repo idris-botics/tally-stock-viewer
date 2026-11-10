@@ -29,6 +29,7 @@ class FakeFiles:
                 self.d.calls["list"] += 1
                 m = re.search(r"'([^']+)' in parents", q)
                 parent = m.group(1)
+                if parent == "root": parent = self.d.root       # Drive's alias for the Drive root
                 want_trashed = False if "trashed = false" in q else None
                 name = None
                 nm = re.match(r"name = '((?:\\.|[^'\\])*)'", q)
@@ -49,10 +50,11 @@ class FakeFiles:
     def create(self, body=None, media_body=None, fields=None):
         def run():
             with self.d.lock:
-                if not all(p in self.d.nodes or p == self.d.root for p in body.get("parents", [])):
+                parents = [self.d.root if p == "root" else p for p in body.get("parents", [])]
+                if not all(p in self.d.nodes or p == self.d.root for p in parents):
                     raise make_http_error(404)
                 nid = self.d.new_id()
-                self.d.nodes[nid] = {"id": nid, "name": body["name"], "parents": list(body.get("parents", [])),
+                self.d.nodes[nid] = {"id": nid, "name": body["name"], "parents": parents,
                                      "mimeType": body.get("mimeType", "application/octet-stream"), "trashed": False,
                                      "content": media_body.getbytes(0, media_body.size()) if media_body is not None else b"",
                                      "seq": next(self.d.seq)}
@@ -67,9 +69,23 @@ class FakeFiles:
                 if n is None: raise make_http_error(404)
                 if media_body is not None:
                     n["content"] = media_body.getbytes(0, media_body.size()); self.d.calls["update_media"] += 1
+                if body and "name" in body:
+                    n["name"] = body["name"]; self.d.calls["rename"] += 1
                 if body and "trashed" in body:
                     n["trashed"] = bool(body["trashed"]); self.d.calls["trash" if body["trashed"] else "untrash"] += 1
                 return {"id": fileId}
+        return Req(run)
+
+    def get(self, fileId=None, fields=None):
+        def run():
+            with self.d.lock:
+                n = self.d.nodes.get(fileId)
+                if n is None: raise make_http_error(404)
+                self.d.calls["get"] += 1
+                is_file = n["mimeType"] != FOLDER_MIME
+                return {"id": n["id"], "name": n["name"], "mimeType": n["mimeType"], "trashed": n["trashed"],
+                        "size": str(len(n["content"])) if is_file else None,
+                        "md5Checksum": hashlib.md5(n["content"]).hexdigest() if is_file else None}
         return Req(run)
 
     def delete(self, fileId=None):
@@ -90,7 +106,7 @@ class FakeDrive:
     def __init__(self):
         self.root = "ROOT"; self.nodes = {}; self.lock = threading.RLock(); self.seq = itertools.count(1)
         self._ids = itertools.count(1)
-        self.calls = {k: 0 for k in ("list", "create_media", "create_folder", "update_media", "trash", "untrash", "PERMANENT_DELETE")}
+        self.calls = {k: 0 for k in ("list", "create_media", "create_folder", "update_media", "trash", "untrash", "PERMANENT_DELETE", "rename", "get")}
     def new_id(self): return "F%05d" % next(self._ids)
     def service(self): return FakeService(self)
     def live_files(self): return [n for n in self.nodes.values() if n["mimeType"] != FOLDER_MIME and not n["trashed"]]

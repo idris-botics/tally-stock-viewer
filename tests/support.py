@@ -126,6 +126,8 @@ def restore_state(snapshot):
     db._dealer_dirty = db._accounts_dirty = True
     app_module._feeder_dirty = True
     app_module._feeder_file_state.clear()
+    if hasattr(app_module, "_usage_cache_clear"):
+        app_module._usage_cache_clear()
     with contextlib.redirect_stdout(io.StringIO()):
         app_module.load_data(refresh_first=False)
 

@@ -37,6 +37,7 @@ from flask.sessions import SecureCookieSessionInterface
 from itsdangerous import TimestampSigner, BadSignature, SignatureExpired
 from PIL import Image, ImageOps
 
+import activity_tiers
 import cloud_backup
 import database as db
 import image_scanner
@@ -625,10 +626,13 @@ ACTIVITY_TOUCH_INTERVAL_SECONDS = 60
 ACTIVITY_SEARCH_COLLAPSE_SECONDS = 10     # type-ahead keystrokes -> one row
 ACTIVITY_VIEW_CAR_COLLAPSE_SECONDS = 600  # same car reopened within 10 min -> refresh the row
 ACTIVITY_BEACON_MAX_PER_MINUTE = 30       # per user, /api/activity only
-ACTIVITY_RETENTION_DAYS = 60
+# Raw user_activity rows stay for this many days (env ACTIVITY_RETENTION_DAYS, default 90).
+# Older whole months are summarised, archived to the separate Drive folder, then removed --
+# see activity_tiers.py / activity_archive.py.
+ACTIVITY_RETENTION_DAYS = activity_tiers.retention_days()
 ACTIVITY_PRUNE_INTERVAL_SECONDS = 24 * 3600
 ACTIVITY_MAX_TRACKED_USERS = 5000         # hard cap on each in-memory dict
-ACTIVITY_VISIT_GAP_MINUTES = 30
+ACTIVITY_VISIT_GAP_MINUTES = db.ACTIVITY_VISIT_GAP_MINUTES   # the one shared visit rule
 
 # Endpoints whose GETs count as a person using the app. Any GET not listed
 # here is treated as background/asset traffic and ignored (default-deny, so
@@ -801,16 +805,19 @@ def api_activity():
     return "", 204
 
 
-def _maybe_prune_user_activity():
-    """Called from the existing resource-monitor timer tick (no new thread);
-    does real work at most once per ACTIVITY_PRUNE_INTERVAL_SECONDS."""
+def _maybe_update_activity_summaries():
+    """Called from the existing resource-monitor timer tick (no new thread); does real work
+    at most once per ACTIVITY_PRUNE_INTERVAL_SECONDS. It only WRITES SUMMARIES (finished IST
+    days, monthly tops) -- raw rows are never deleted here; that happens only in
+    activity_archive.run_archive() after a verified Drive upload."""
     global _activity_last_prune
     now = time.monotonic()
     if _activity_last_prune and now - _activity_last_prune < ACTIVITY_PRUNE_INTERVAL_SECONDS:
         return
     _activity_last_prune = now
-    removed = db.prune_user_activity(ACTIVITY_RETENTION_DAYS)
-    logger.info("Pruned %d user_activity row(s) older than %d days", removed, ACTIVITY_RETENTION_DAYS)
+    done = activity_tiers.ensure_summaries()
+    if done["days"] or done["months"]:
+        logger.info("Activity summaries: %d day(s), %d month(s) updated", done["days"], done["months"])
 
 
 _ACTIVITY_LABELS = {
@@ -1817,9 +1824,9 @@ def start_resource_monitor():
         # Piggybacks on this existing timer (no extra thread); self-limits to
         # once a day. Defined later in the module, resolved at call time.
         try:
-            _maybe_prune_user_activity()
+            _maybe_update_activity_summaries()
         except Exception:
-            logger.exception("user_activity prune failed")
+            logger.exception("activity summaries failed")
         _resource_log_timer = threading.Timer(Config.RESOURCE_LOG_INTERVAL_SECONDS, _job)
         _resource_log_timer.daemon = True
         _resource_log_timer.start()
@@ -3858,7 +3865,136 @@ def admin_get_all_customers():
 
 IST_OFFSET = timedelta(hours=5, minutes=30)
 ACTIVITY_STATS_DEFAULT_DAYS = 30
-ACTIVITY_STATS_MAX_DAYS = 30
+ACTIVITY_STATS_MAX_DAYS = ACTIVITY_RETENTION_DAYS          # raw ranges: 1 .. raw window
+# Ranges beyond the raw window come from the permanent summaries (key -> days back, None = all time).
+ACTIVITY_LONG_RANGES = {"6m": 183, "1y": 365, "all": None}
+ACTIVITY_WEEKLY_ABOVE_DAYS = 120    # long ranges are shown one bar per week above this
+
+
+# Measured with ~100,000 synthetic rows, a 60-day query takes about 1.4 s, so a repeated click (or a few admins
+# opening the panel) must not repeat it: one short-lived entry per (range, dealer, IST date), bounded.
+USAGE_CACHE_TTL_SECONDS = 60
+USAGE_CACHE_MAX_ENTRIES = 64
+_usage_cache = {}
+_usage_cache_lock = threading.Lock()
+
+
+def _usage_cache_clear():
+    with _usage_cache_lock:
+        _usage_cache.clear()
+
+
+def _usage_cached(key, build):
+    now = time.monotonic()
+    with _usage_cache_lock:
+        hit = _usage_cache.get(key)
+        if hit and now - hit[0] < USAGE_CACHE_TTL_SECONDS:
+            return hit[1]
+    payload = build()
+    with _usage_cache_lock:
+        for k in [k for k, (t, _p) in _usage_cache.items() if now - t >= USAGE_CACHE_TTL_SECONDS]:
+            del _usage_cache[k]
+        while len(_usage_cache) >= USAGE_CACHE_MAX_ENTRIES:
+            del _usage_cache[min(_usage_cache, key=lambda k: _usage_cache[k][0])]
+        _usage_cache[key] = (now, payload)
+    return payload
+
+
+def _usage_assemble(days, user_id, first_day, agg, visits_by_day, source, granularity, reduced, note, range_key):
+    """Shared by the raw and the summary path: turns aggregates into the panel's JSON."""
+    if granularity == "week":
+        day_labels, d = [], first_day - timedelta(days=first_day.weekday())
+        while d <= agg["last_day"]:
+            day_labels.append(d.isoformat())
+            d += timedelta(days=7)
+    else:
+        day_labels = [(first_day + timedelta(days=i)).isoformat() for i in range(days)]
+    by_day = {d: (actions, users) for d, actions, users in agg["daily"]}
+
+    hours = None
+    if agg["hours"] is not None:
+        hours = [0] * 24
+        for h, n in agg["hours"]:
+            hours[int(h)] = int(n)
+
+    users = {}
+    for uid_, username, action, n in agg["per_user"]:
+        u = users.setdefault(uid_, {"user_id": uid_, "username": username, "total": 0, "by_action": {}})
+        if action:
+            u["by_action"][action] = int(n)
+            u["total"] += int(n)
+    per_user = sorted(users.values(), key=lambda u: (-u["total"], u["username"].lower()))
+
+    total_actions = sum(a for a, _ in by_day.values())
+    peak_hour = max(range(24), key=lambda h: (hours[h], -h)) if (total_actions and hours is not None) else None
+    return {
+        "days": days,
+        "range": range_key,
+        "source": source,
+        "granularity": granularity,
+        "reduced": reduced,
+        "note": note,
+        "user_id": user_id,
+        "summary": {
+            "total_actions": total_actions,
+            "active_users": sum(1 for u in per_user if u["total"] > 0),
+            "total_users": len(per_user),
+            "visits": sum(visits_by_day.values()),
+            "peak_hour_ist": peak_hour,
+        },
+        "daily": [{
+            "date": d,
+            "active_users": by_day.get(d, (0, 0))[1],
+            "actions": by_day.get(d, (0, 0))[0],
+            "visits": visits_by_day.get(d, 0),
+        } for d in day_labels],
+        "hourly": hours,
+        "per_user": per_user,
+        "top_cars": None if agg["cars"] is None else [{"name": n, "count": c} for n, c in agg["cars"]],
+        "top_searches": None if agg["searches"] is None else [{"query": q, "count": c} for q, c in agg["searches"]],
+    }
+
+
+def _usage_from_raw(days, user_id):
+    now_ist = datetime.now(timezone.utc).replace(tzinfo=None) + IST_OFFSET
+    first_day = now_ist.date() - timedelta(days=days - 1)
+    start_utc = (datetime.combine(first_day, datetime.min.time()) - IST_OFFSET).isoformat(timespec="seconds")
+    agg = db.get_activity_stats(start_utc, user_id)
+    agg["last_day"] = now_ist.date()
+    return _usage_assemble(days, user_id, first_day, agg, dict(agg["visits"]), "raw", "day", [], "", None)
+
+
+def _usage_from_summaries(range_key, user_id):
+    today = activity_tiers.ist_today()
+    yesterday = today - timedelta(days=1)
+    try:   # only does work when a finished day has not been summarised yet
+        activity_tiers.ensure_summaries(quick=True)
+    except Exception as exc:
+        logger.warning("activity summaries catch-up failed (%s)", type(exc).__name__)
+    back = ACTIVITY_LONG_RANGES[range_key]
+    if back is None:
+        earliest = activity_tiers.first_summarised_day()
+        first_day = datetime.strptime(earliest, "%Y-%m-%d").date() if earliest else yesterday
+    else:
+        first_day = today - timedelta(days=back - 1)
+    first_day = min(first_day, yesterday)
+    days = (yesterday - first_day).days + 1
+    weekly = days > ACTIVITY_WEEKLY_ABOVE_DAYS
+    agg = activity_tiers.get_summary_stats(first_day.isoformat(), yesterday.isoformat(), user_id, weekly=weekly)
+    agg["last_day"] = yesterday
+    visits_by_day = {d: int(v or 0) for d, _a, _u, v in agg["daily"]}
+    agg["daily"] = [(d, int(a or 0), int(u or 0)) for d, a, u, _v in agg["daily"]]
+    reduced = ["visit_detail"]
+    if agg["hours"] is None:
+        reduced.append("busiest_hours")
+    if agg["cars"] is None:
+        reduced += ["top_cars", "top_searches"]
+    note = (f"Long range: built from the permanent daily summaries (up to yesterday, not today). "
+            f"Reduced: no per-visit or per-search detail older than {ACTIVITY_RETENTION_DAYS} days"
+            + ("; busiest hours and top cars/searches are not available for a single dealer" if user_id is not None else
+               "; top cars and searches are each month's top 50 added together, so approximate")
+            + ("; one bar per week" if weekly else "") + ".")
+    return _usage_assemble(days, user_id, first_day, agg, visits_by_day, "summary", "week" if weekly else "day", reduced, note, range_key)
 
 
 @app.route("/admin/user_activity_stats")
@@ -3866,7 +4002,11 @@ ACTIVITY_STATS_MAX_DAYS = 30
 @accounts_access_required
 def admin_user_activity_stats():
     """Read-only aggregates for the Usage Charts panel (compact JSON only,
-    never raw rows). Days are IST calendar days ending today."""
+    never raw rows). Days are IST calendar days ending today. ?days=N (1..raw window)
+    reads the raw rows; ?range=6m|1y|all reads the permanent summaries."""
+    range_key = request.args.get("range", "").strip().lower()
+    if range_key and range_key not in ACTIVITY_LONG_RANGES:
+        return jsonify({"error": "invalid range"}), 400
     try:
         days = int(request.args.get("days", ""))
     except (TypeError, ValueError):
@@ -3889,72 +4029,12 @@ def admin_user_activity_stats():
             return jsonify({"error": "invalid user_id"}), 400
 
     try:
-        now_ist = datetime.now(timezone.utc).replace(tzinfo=None) + IST_OFFSET
-        first_day = now_ist.date() - timedelta(days=days - 1)
-        start_utc = (datetime.combine(first_day, datetime.min.time()) - IST_OFFSET).isoformat(timespec="seconds")
-        agg = db.get_activity_stats(start_utc, user_id)
-
-        day_labels = [(first_day + timedelta(days=i)).isoformat() for i in range(days)]
-        by_day = {d: (actions, users) for d, actions, users in agg["daily"]}
-
-        # Visits: same 30-minute rule as the per-user view (shared splitter);
-        # stamps arrive grouped by user, newest first.
-        visits_by_day = {}
-        total_visits = 0
-        current_user, bucket = None, []
-
-        def _flush():
-            nonlocal total_visits
-            for group in split_into_visit_groups(bucket, lambda r: r[1]):
-                start_ist = datetime.fromisoformat(group[0][1]) + IST_OFFSET
-                key = start_ist.date().isoformat()
-                visits_by_day[key] = visits_by_day.get(key, 0) + 1
-                total_visits += 1
-
-        for stamp in agg["stamps"]:
-            if stamp[0] != current_user and bucket:
-                _flush()
-                bucket = []
-            current_user = stamp[0]
-            bucket.append(stamp)
-        if bucket:
-            _flush()
-
-        hours = [0] * 24
-        for h, n in agg["hours"]:
-            hours[int(h)] = n
-
-        users = {}
-        for uid_, username, action, n in agg["per_user"]:
-            u = users.setdefault(uid_, {"user_id": uid_, "username": username, "total": 0, "by_action": {}})
-            if action:
-                u["by_action"][action] = n
-                u["total"] += n
-        per_user = sorted(users.values(), key=lambda u: (-u["total"], u["username"].lower()))
-
-        total_actions = sum(a for a, _ in by_day.values())
-        peak_hour = max(range(24), key=lambda h: (hours[h], -h)) if total_actions else None
-        return jsonify({
-            "days": days,
-            "user_id": user_id,
-            "summary": {
-                "total_actions": total_actions,
-                "active_users": sum(1 for u in per_user if u["total"] > 0),
-                "total_users": len(per_user),
-                "visits": total_visits,
-                "peak_hour_ist": peak_hour,
-            },
-            "daily": [{
-                "date": d,
-                "active_users": by_day.get(d, (0, 0))[1],
-                "actions": by_day.get(d, (0, 0))[0],
-                "visits": visits_by_day.get(d, 0),
-            } for d in day_labels],
-            "hourly": hours,
-            "per_user": per_user,
-            "top_cars": [{"name": n, "count": c} for n, c in agg["cars"]],
-            "top_searches": [{"query": q, "count": c} for q, c in agg["searches"]],
-        })
+        today_key = activity_tiers.ist_today().isoformat()
+        if range_key:
+            payload = _usage_cached(("summary", range_key, user_id, today_key), lambda: _usage_from_summaries(range_key, user_id))
+        else:
+            payload = _usage_cached(("raw", days, user_id, today_key), lambda: _usage_from_raw(days, user_id))
+        return jsonify(payload)
     except Exception as exc:
         logger.warning("usage stats failed (%s)", type(exc).__name__)
         return jsonify({"error": "Could not load usage stats"}), 500

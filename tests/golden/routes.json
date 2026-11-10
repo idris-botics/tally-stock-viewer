@@ -864,9 +864,9 @@
   "type": "text/html"
  },
  "admin_unlocked GET /admin/accounts": {
-  "body": "1967bfe28b",
+  "body": "c68026679f",
   "cache": "",
-  "len": 32841,
+  "len": 34646,
   "location": "",
   "status": 200,
   "type": "text/html"
@@ -1064,9 +1064,9 @@
   "type": "application/json"
  },
  "admin_unlocked GET /admin/user_activity_stats": {
-  "body": "d1c1ad6e10",
+  "body": "a84bd8636a",
   "cache": "no-store",
-  "len": 868,
+  "len": 949,
   "location": "",
   "status": 200,
   "type": "application/json"
