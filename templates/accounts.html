@@ -632,9 +632,6 @@
             <div class="usage-cards" id="usageCards"></div>
             <div class="usage-charts">
                 <div class="usage-chart-box wide"><h3>Daily activity</h3><div class="usage-canvas-wrap"><canvas id="chartDaily" role="img" aria-label="Daily active users, visits and actions"></canvas></div></div>
-                <div class="usage-chart-box wide" id="boxHeatmap"><h3>When dealers use it (weekday &times; hour, IST)</h3><p class="usage-sub" id="heatSub"></p><div id="heatmapWrap"></div><div class="heat-readout" id="heatReadout" aria-live="polite">Tap a square to see its count.</div><div class="heat-legend"><span>fewer</span><i style="background:rgba(31,111,235,0.15)"></i><i style="background:rgba(31,111,235,0.4)"></i><i style="background:rgba(31,111,235,0.7)"></i><i style="background:rgba(31,111,235,1)"></i><span>more actions</span></div></div>
-                <div class="usage-chart-box" id="boxWeekdays"><h3>Sunday vs other days</h3><div id="weekdaysWrap"></div><p class="usage-callout" id="sundayCallout"></p></div>
-                <div class="usage-chart-box" id="boxNewReturning"><h3>New vs returning dealers, per week</h3><div class="usage-canvas-wrap"><canvas id="chartNewReturning" role="img" aria-label="New and returning dealers per week"></canvas></div></div>
                 <div class="usage-chart-box wide" id="boxDormant"><h3>Dormant dealers (no activity for 14+ days)</h3><div id="dormantWrap"></div></div>
                 <div class="usage-chart-box"><h3>Busiest hours (IST)</h3><div class="usage-canvas-wrap"><canvas id="chartHourly" role="img" aria-label="Actions by hour of day"></canvas></div></div>
                 <div class="usage-chart-box"><h3>Top cars opened</h3><div class="usage-canvas-wrap"><canvas id="chartCars" role="img" aria-label="Most opened cars"></canvas></div></div>
@@ -928,80 +925,8 @@ function showBox(id, visible) {
     document.getElementById(id).style.display = visible ? "" : "none";
 }
 
-function renderHeatmap(ins) {
-    const grid = ins.heatmap;
-    showBox("boxHeatmap", !!grid);
-    if (!grid) return;
-    const max = Math.max(1, ...grid.flat());
-    let html = `<div class="heat-grid" role="img" aria-label="Actions by weekday and hour, IST">` + `<span></span>`;
-    for (let h = 0; h < 24; h++) {
-        html += h % 3 === 0 ? `<span class="hd" style="grid-column: span 3">${hourLabel(h)}</span>` : "";
-    }
-    grid.forEach((row, w) => {
-        html += `<span class="dn">${WEEKDAY_SHORT[w]}</span>`;
-        row.forEach((n, h) => {
-            const bg = n ? `rgba(31,111,235,${(0.15 + 0.85 * n / max).toFixed(2)})` : "";
-            html += `<button type="button" class="cell" data-w="${w}" data-h="${h}" data-n="${n}" aria-label="${WEEKDAY_SHORT[w]} ${hourLabel(h)}: ${n} actions" ${bg ? `style="background:${bg}"` : ""}></button>`;
-        });
-    });
-    html += `</div>`;
-    const wrap = document.getElementById("heatmapWrap");
-    wrap.innerHTML = html;
-    const readout = document.getElementById("heatReadout");
-    wrap.onclick = wrap.onmouseover = (event) => {
-        const cell = event.target.closest(".cell");
-        if (!cell) return;
-        const n = Number(cell.dataset.n);
-        readout.textContent = `${WEEKDAY_SHORT[cell.dataset.w]} ${hourLabel(Number(cell.dataset.h))}: ${n} action${n === 1 ? "" : "s"}`;
-    };
-    document.getElementById("heatSub").textContent =
-        `${fullDate(ins.first_day)} to ${fullDate(ins.last_day)}`;
-}
 
-function renderWeekdays(ins) {
-    const wk = ins.weekdays;
-    showBox("boxWeekdays", !!wk);
-    if (!wk) return;
-    document.getElementById("weekdaysWrap").innerHTML = `<table class="wk-table"><thead><tr><th>Day</th><th>Actions</th><th>Dealers</th><th>Visits</th><th>Days</th></tr></thead><tbody>` +
-        wk.map((w, i) => `<tr class="${i === 6 ? "sunday" : ""}"><td>${w.weekday.slice(0, 3)}</td><td>${w.avg_actions ?? "-"}</td><td>${w.avg_dealers ?? "-"}</td><td>${w.avg_visits ?? "-"}</td><td>${w.days}</td></tr>`).join("") +
-        `</tbody></table>`;
-    const sun = wk[6];
-    const others = wk.slice(0, 6);
-    const days = others.reduce((a, w) => a + w.days, 0);
-    const callout = document.getElementById("sundayCallout");
-    if (!sun.days || !days) {
-        callout.textContent = "";
-        return;
-    }
-    const avg = (key) => (others.reduce((a, w) => a + w[key], 0) / days).toFixed(1);
-    callout.textContent = `Sundays: ${sun.avg_actions} actions and ${sun.avg_dealers} dealers a day (${sun.days} Sunday${sun.days === 1 ? "" : "s"}). ` +
-        `Monday to Saturday: ${avg("actions")} actions and ${(others.reduce((a, w) => a + w.avg_dealers * w.days, 0) / days).toFixed(1)} dealers a day.`;
-}
 
-function renderNewReturning(ins) {
-    const series = ins.new_returning;
-    showBox("boxNewReturning", !!series);
-    if (!series) return;
-    usageCharts.chartNewReturning = new Chart(document.getElementById("chartNewReturning"), {
-        type: "bar",
-        data: {
-            labels: series.map(w => shortDate(w.week)),
-            datasets: [
-                { label: "New", backgroundColor: "#f59e0b", data: series.map(w => w.new) },
-                { label: "Returning", backgroundColor: "#1f6feb", data: series.map(w => w.returning) },
-            ],
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: { legend: { position: "bottom" } },
-            scales: {
-                x: { stacked: true, ticks: { autoSkip: true, maxRotation: 0, maxTicksLimit: 8 } },
-                y: { stacked: true, beginAtZero: true, ticks: { precision: 0 } },
-            },
-        },
-    });
-}
 
 function renderDormant(ins) {
     const d = ins.dormant;
@@ -1071,7 +996,7 @@ function usageCsvText(data) {
     add(data.granularity === "week" ? "Week starting" : "Date", "Actions", "Visits", "Active dealers");
     data.daily.forEach(d => add(d.date, d.actions, d.visits, d.active_users));
     if (ins.weekdays) { rows.push(""); add("Note", "Averages are per day, counting days with no activity as zero."); add("Weekday", "Avg actions/day", "Avg dealers/day", "Avg visits/day", "Days counted"); ins.weekdays.forEach(w => add(w.weekday, w.avg_actions, w.avg_dealers, w.avg_visits, w.days)); }
-    if (ins.heatmap) { rows.push(""); add("Weekday x hour (IST)", ...Array.from({ length: 24 }, (_, h) => hourLabel(h))); ins.heatmap.forEach((r, i) => add(WEEKDAY_SHORT[i], ...r)); }
+    if (ins.heatmap) { rows.push(""); add("Note", `Weekday x hour: dealers only, finished days ${ins.first_day} to ${ins.last_day} (today not included).`); add("Weekday x hour (IST)", ...Array.from({ length: 24 }, (_, h) => hourLabel(h))); ins.heatmap.forEach((r, i) => add(WEEKDAY_SHORT[i], ...r)); }
     if (data.hourly) { rows.push(""); add("Hour (IST)", "Actions"); data.hourly.forEach((n, h) => add(hourLabel(h), n)); }
     if (ins.new_returning) { rows.push(""); add("Note", "Weeks start Monday. New = first time seen since tracking began, so the first tracked week counts everyone as new."); add("Week starting", "New dealers", "Returning dealers"); ins.new_returning.forEach(w => add(w.week, w.new, w.returning)); }
     rows.push(""); add("Dealer", "Total", ...USAGE_GROUPS.map(g => g.label));
@@ -1208,9 +1133,6 @@ function renderUsage(data) {
         },
     });
 
-    renderHeatmap(ins);
-    renderWeekdays(ins);
-    renderNewReturning(ins);
     renderDormant(ins);
     renderDealerChip(data);
 
