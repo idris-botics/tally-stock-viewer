@@ -6437,7 +6437,7 @@ def _record_stock_interest(response):
     """Server-side only: it rides on the /designs and car-search requests that already happen (no new request, no
     polling). Any problem is logged by class name and ignored."""
     try:
-        if response.status_code >= 400:
+        if response.status_code != 200:          # only a successful answer is counted (not a redirect, 204, 304 or an error)
             return response
         endpoint = request.endpoint
         if endpoint not in ("designs", "search.search_cars"):
