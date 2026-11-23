@@ -4,6 +4,7 @@ import json
 import os
 import re
 import unittest
+from unittest import mock
 
 from tests import support
 from tests.support import PAYLOAD, INTAKE_HEADERS
@@ -187,6 +188,114 @@ class IntakeGuard(unittest.TestCase):
         # and the success response is unchanged
         body = self.push(PAYLOAD).get_json()
         self.assertEqual(body, {"ok": True, "car_count": 2, "hierarchy_rows": 6, "stock_rows": 3})
+
+
+DATA_FILES = ("car_master.json", "main_hierarchy.json", "item stock list.auto.json")
+
+
+class IntakeApplyIsOneUnit(unittest.TestCase):
+    """A push is either fully on disk or not at all, and a failed write is an error (F002, F010, F034)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app_module, cls.db = support.bootstrap()
+        cls.snapshot = support.snapshot_state()
+
+    def setUp(self):
+        support.restore_state(self.snapshot)
+        self.anon = support.client_for("anonymous")
+        self.dealer = support.client_for("dealer")
+
+    def tearDown(self):
+        support.restore_state(self.snapshot)
+
+    def push(self, payload=PAYLOAD):
+        return self.anon.post("/admin/intake/sync_data", json=payload, headers=INTAKE_HEADERS)
+
+    def all_bytes(self):
+        out = {}
+        for name in DATA_FILES:
+            with open(os.path.join(support.data_dir(), name), "rb") as handle:
+                out[name] = handle.read()
+        return out
+
+    def changed_push(self):
+        payload = copy.deepcopy(PAYLOAD)
+        payload["item_stock"][0]["qty"] = 99
+        payload["main_hierarchy"][1]["qty"] = 99
+        payload["car_master"] = ["ALTO", "SWIFT", "ZEN"]
+        payload["main_hierarchy"] += [{"item_name": "ZEN", "qty": 1}, {"item_name": "ZEN 7D MAT BLACK", "qty": 1}]
+        return payload
+
+    def fail_writing(self, which, when):
+        """Make the n-th (1-based) call of app.<which> that touches one of the three data files raise OSError."""
+        app_module = self.app_module
+        real = getattr(app_module, which, None)
+        data_paths = {os.path.abspath(p) for p in (app_module.CAR_MASTER_CACHE_JSON, app_module.MAIN_HIERARCHY_CACHE_JSON, app_module.ITEM_STOCK_CACHE_JSON)}
+        calls = []
+
+        def wrapper(*args, **kwargs):
+            touched = [a for a in args[:2] if isinstance(a, str) and os.path.abspath(a) in data_paths]
+            if touched:
+                calls.append(touched[0])
+                if when(len(calls), touched[0]):
+                    raise OSError("disk full")
+            return real(*args, **kwargs)
+        return mock.patch.object(app_module, which, wrapper, create=True)
+
+    def test_failed_stock_write_is_an_error(self):
+        before_seen = self.app_module.FEEDER_LAST_SEEN_AT
+        stock_path = os.path.abspath(self.app_module.ITEM_STOCK_CACHE_JSON)
+        with self.fail_writing("_write_json_temp", lambda n, path: os.path.abspath(path) == stock_path):
+            response = self.push(self.changed_push())
+        self.assertEqual(response.status_code, 500)
+        self.assertNotIn("disk full", response.get_data(as_text=True))
+        self.assertEqual(response.get_json(), {"error": "Failed to apply pushed data. See the server log."})
+        self.assertEqual(self.app_module.FEEDER_LAST_SEEN_AT, before_seen)
+
+    def test_failure_midway_leaves_all_three_files_unchanged(self):
+        before = self.all_bytes()
+        with self.fail_writing("_write_json_temp", lambda n, path: n == 2):
+            self.assertEqual(self.push(self.changed_push()).status_code, 500)
+        self.assertEqual(self.all_bytes(), before)
+
+    def test_failure_on_the_last_write_leaves_all_three_files_unchanged(self):
+        before = self.all_bytes()
+        with self.fail_writing("_write_json_temp", lambda n, path: n == 3):
+            self.assertEqual(self.push(self.changed_push()).status_code, 500)
+        self.assertEqual(self.all_bytes(), before)
+
+    def test_failure_while_replacing_files_restores_the_previous_ones(self):
+        before = self.all_bytes()
+        with self.fail_writing("_commit_json", lambda n, path: n == 3):
+            self.assertEqual(self.push(self.changed_push()).status_code, 500)
+        self.assertEqual(self.all_bytes(), before)
+        self.assertEqual(self.dealer.get("/cars").get_json(), ["ALTO", "SWIFT"])
+
+    def test_failed_reload_restores_previous_files(self):
+        before = self.all_bytes()
+        served_before = self.dealer.get("/cars").get_data()
+        real_load = self.app_module.load_data
+        calls = []
+
+        def flaky_load(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("secret reload failure")
+            return real_load(*args, **kwargs)
+        with mock.patch.object(self.app_module, "load_data", flaky_load):
+            response = self.push(self.changed_push())
+        self.assertEqual(response.status_code, 500)
+        self.assertNotIn("secret reload failure", response.get_data(as_text=True))
+        self.assertEqual(self.all_bytes(), before)
+        self.assertEqual(self.dealer.get("/cars").status_code, 200)
+        self.assertEqual(self.dealer.get("/cars").get_data(), served_before)
+
+    def test_good_push_leaves_no_temporary_or_previous_files(self):
+        self.assertEqual(self.push(self.changed_push()).status_code, 200)
+        self.assertEqual(self.dealer.get("/cars").get_json(), ["ALTO", "SWIFT", "ZEN"])
+        leftovers = [n for n in os.listdir(support.data_dir()) if n.endswith((".prev", ".tmp"))]
+        self.assertEqual(leftovers, [])
 
 
 if __name__ == "__main__":
