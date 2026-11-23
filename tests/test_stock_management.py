@@ -52,6 +52,7 @@ class StockMgmtBase(unittest.TestCase):
             for table in ("stock_state", "stock_events", "capture_meta", "car_interest_daily", "search_miss_daily",
                           "restock_draft", "restock_orders", "stock_mgmt_settings"):
                 conn.execute(f"DELETE FROM {table}")
+            conn.execute("DELETE FROM user_activity WHERE action = 'view_car'")
         patcher = mock.patch.object(self.app_module, "_stock_now_utc", return_value=NOW)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -90,6 +91,13 @@ class StockMgmtBase(unittest.TestCase):
 
     def opens(self, car, role, user_id, opens, days_ago=1):
         self.sql("INSERT OR REPLACE INTO car_interest_daily VALUES (?, ?, ?, ?, ?)", (day(days_ago), car, role, user_id, opens))
+
+    def views(self, car, role="dealer", count=1, days_ago=1):
+        """Car opens as the Usage Charts already record them (user_activity, action 'view_car')."""
+        user = self.rows("SELECT id FROM users WHERE username = ?", ("star" if role == "dealer" else "admin",))[0][0]
+        at = (NOW - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%S")
+        with self.db.get_connection() as conn:
+            conn.executemany("INSERT INTO user_activity (user_id, at_utc, action, detail) VALUES (?, ?, 'view_car', ?)", [(user, at, car)] * count)
 
     def get(self, tab, client=None, **params):
         response = (client or self.admin).get(BASE + "/data", query_string=dict(tab=tab, **params))
@@ -213,7 +221,7 @@ class VelocityAndNeeds(StockMgmtBase):
         self.tracking_since(10)
         self.in_stock(**{"CARB_ITEM_001": 1, "CARB_ITEM_002": 1, "CARB_ITEM_003": 1})
         self.event("CARC ITEM 001", 4, 0, 2)                        # sold out and gone: relevant
-        self.opens("CARA", "dealer", 1, 3)                          # dealers open CARA: its items are relevant
+        self.views("CARA", "dealer", 3)                             # dealers open CARA: its items are relevant
         rows = self.get("needs", section="out")["rows"]
         self.assertEqual(sorted(self.names(rows)), ["CARA ITEM 001", "CARA ITEM 002", "CARA ITEM 003", "CARC ITEM 001"])
         everything = self.get("needs", section="out", show_all=1)
@@ -224,7 +232,7 @@ class VelocityAndNeeds(StockMgmtBase):
         self.in_stock(**{"CARB_ITEM_001": 1})
         self.event("CARC ITEM 001", 10, 0, 2)                       # sold 10
         self.event("CARC ITEM 002", 30, 0, 2)                       # sold 30: faster
-        self.opens("CARA", "dealer", 1, 5)
+        self.views("CARA", "dealer", 5)
         rows = self.get("needs", section="out")["rows"]
         self.assertEqual(self.names(rows)[:2], ["CARC ITEM 002", "CARC ITEM 001"])
 

@@ -4225,15 +4225,11 @@ def _training_sort_by_interest():
 
 
 def _training_interest_scores():
-    """{car_key: opens in the last 30 days}, ONE aggregated query; {} when nothing has been recorded."""
+    """{car_key: opens in the last 30 days} from the Usage Charts' activity log (ONE aggregated query); {} when
+    there is none."""
     try:
         with db.get_connection() as conn:
-            include_admin = _stock_mgmt_settings(conn)["include_admin"]
-            roles = ("dealer", "admin") if include_admin else ("dealer",)
-            marks = ",".join("?" for _ in roles)
-            return {row[0]: row[1] for row in conn.execute(
-                f"SELECT car_key, SUM(opens) FROM car_interest_daily WHERE day_ist > ? AND role IN ({marks}) GROUP BY car_key",
-                (_ist_day_minus(30), *roles)) if row[1] and row[1] > 0}
+            return {key: count for key, count in _stock_car_interest(conn, bool(_stock_mgmt_settings(conn)["include_admin"])).items() if count > 0}
     except Exception as exc:
         logger.warning("training order by interest unavailable (%s)", type(exc).__name__)
         return {}
@@ -6664,6 +6660,25 @@ def _stock_days_left_text(value):
     return None if value is None else int(math.floor(value + 0.5))
 
 
+def _stock_car_of(item_key, catalogue):
+    """The car an item is listed under on the Needs restocking tab: the first car in the hierarchy that has it."""
+    entry = catalogue["items"].get(item_key)
+    if entry and entry[1]:
+        return catalogue["cars"][entry[1][0]][0]
+    return "Other (not under a car)"
+
+
+def _stock_group_rows(rows):
+    """rows: [(sort_tuple, row_dict)] -> row dicts ordered car by car. The car with the most urgent item comes first,
+    and inside a car the most urgent item comes first, so the top of every list is still what needs doing soonest."""
+    best = {}
+    for sort_key, row in rows:
+        car = row["car"]
+        if car not in best or sort_key < best[car]:
+            best[car] = sort_key
+    rows.sort(key=lambda pair: (best[pair[1]["car"]], pair[1]["car"], pair[0]))
+    return [row for _key, row in rows]
+
 def _stock_page(rows, page):
     start = (page - 1) * STOCK_MGMT_PAGE_SIZE
     return {"rows": rows[start:start + STOCK_MGMT_PAGE_SIZE], "total": len(rows), "page": page,
@@ -6671,12 +6686,20 @@ def _stock_page(rows, page):
 
 
 def _stock_car_interest(conn, include_admin):
-    """{car_key: opens in the last 30 days}."""
-    roles = ("dealer", "admin") if include_admin else ("dealer",)
+    """{car_key: times the car was opened in the last 30 days}, read from the activity log the Usage Charts already
+    keep (user_activity, action 'view_car'), so it has history from day one. A reload within 10 minutes is already
+    one row there. Dealers always count; admins only when `include_admin`."""
+    roles = ("customer", "admin") if include_admin else ("customer",)
     marks = ",".join("?" for _ in roles)
-    return {row[0]: row[1] for row in conn.execute(
-        f"SELECT car_key, SUM(opens) FROM car_interest_daily WHERE day_ist > ? AND role IN ({marks}) GROUP BY car_key",
-        (_ist_day_minus(30), *roles))}
+    cutoff = (_stock_now_utc() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S")
+    counts = {}
+    for detail, total in conn.execute(
+            f"SELECT a.detail, COUNT(*) FROM user_activity a JOIN users u ON u.id = a.user_id "
+            f"WHERE a.action = 'view_car' AND a.at_utc >= ? AND u.role IN ({marks}) GROUP BY a.detail", (cutoff, *roles)):
+        key = _stock_item_key(detail)
+        if key:
+            counts[key] = counts.get(key, 0) + total
+    return counts
 
 
 def _stock_tab_needs(conn, section, q, page, show_all):
@@ -6690,6 +6713,7 @@ def _stock_tab_needs(conn, section, q, page, show_all):
     cover = settings["order_cover_days"]
     query = _stock_item_key(q)
     rows = []
+    catalogue = _stock_catalogue()
     if section == "low":
         for key, (name, qty) in state.items():
             if query and query not in key:
@@ -6699,14 +6723,13 @@ def _stock_tab_needs(conn, section, q, page, show_all):
             by_days = days_left is not None and tracking["stock_days"] >= STOCK_MGMT_MIN_HISTORY_DAYS and days_left <= settings["low_days"]
             if not (by_days or qty <= settings["low_qty"]):
                 continue
-            rows.append((days_left if days_left is not None else float("inf"), qty, key, {
-                "item_key": key, "item_name": name, "qty": qty, "speed": round(speed, 1),
+            rows.append(((days_left if days_left is not None else float("inf"), qty, key), {
+                "item_key": key, "item_name": name, "car": _stock_car_of(key, catalogue), "qty": qty, "speed": round(speed, 1),
                 "days_left": _stock_days_left_text(days_left), "no_recent_sales": speed <= 0,
                 "open_order": orders.get(key), "on_order_list": key in on_list,
                 "suggested_qty": _stock_suggested_qty(speed, qty, cover)}))
-        rows.sort(key=lambda r: r[:3])
+        rows = _stock_group_rows(rows)
     else:
-        catalogue = _stock_catalogue()
         interest = _stock_car_interest(conn, bool(settings["include_admin"]))
         names = {row[0]: row[1] for row in conn.execute("SELECT item_key, MAX(item_name) FROM stock_events GROUP BY item_key")}
         if show_all:
@@ -6723,12 +6746,12 @@ def _stock_tab_needs(conn, section, q, page, show_all):
             name = entry[0] if entry else names.get(key) or key
             speed = sold.get(key, 0) / window
             asked = sum(interest.get(car, 0) for car in (entry[1] if entry else ()))
-            rows.append((-speed, -asked, key, {
-                "item_key": key, "item_name": name, "qty": 0, "speed": round(speed, 1), "asked": asked,
+            rows.append(((-speed, -asked, key), {
+                "item_key": key, "item_name": name, "car": _stock_car_of(key, catalogue), "qty": 0, "speed": round(speed, 1), "asked": asked,
                 "open_order": orders.get(key), "on_order_list": key in on_list,
                 "suggested_qty": _stock_suggested_qty(speed, 0, cover)}))
-        rows.sort(key=lambda r: r[:3])
-    payload = _stock_page([r[3] for r in rows], page)
+        rows = _stock_group_rows(rows)
+    payload = _stock_page(rows, page)
     payload.update(tab="needs", section=section, settings=settings, tracking=tracking, show_all=bool(show_all))
     return payload
 

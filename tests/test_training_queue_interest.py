@@ -41,6 +41,7 @@ class TrainingQueueBase(unittest.TestCase):
         with self.db.get_connection() as conn:
             for table in ("car_interest_daily", "stock_mgmt_settings"):
                 conn.execute(f"DELETE FROM {table}")
+            conn.execute("DELETE FROM user_activity WHERE action = 'view_car'")
             conn.execute("DELETE FROM mappings")
             conn.execute("DELETE FROM images")
             conn.execute("DELETE FROM folder_car_mapping")
@@ -59,8 +60,11 @@ class TrainingQueueBase(unittest.TestCase):
                              (folder, name, f"{folder}/{name}"))
 
     def opens(self, car, role, user_id, count, days_ago=1):
+        """Car opens as the Usage Charts already record them (user_activity, action 'view_car'); user_id is unused."""
+        at = (NOW - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%S")
         with self.db.get_connection() as conn:
-            conn.execute("INSERT OR REPLACE INTO car_interest_daily VALUES (?, ?, ?, ?, ?)", (day(days_ago), car, role, user_id, count))
+            user = conn.execute("SELECT id FROM users WHERE username = ?", ("star" if role == "dealer" else "admin",)).fetchone()[0]
+            conn.executemany("INSERT INTO user_activity (user_id, at_utc, action, detail) VALUES (?, ?, 'view_car', ?)", [(user, at, car)] * count)
 
     def queue(self, client=None, **params):
         response = (client or self.admin).get("/train_images", query_string=dict({"limit": 200}, **params))
@@ -239,9 +243,10 @@ class Speed(TrainingQueueBase):
         with self.db.get_connection() as conn:
             conn.executemany("INSERT INTO images (car_folder, filename, filepath, scan_date) VALUES (?, ?, ?, '2026-01-01')",
                              [(f"FOLDER {i % 400}", f"img{i:05d}.jpg", f"FOLDER {i % 400}/img{i:05d}.jpg") for i in range(5000)])
-            conn.executemany("INSERT OR REPLACE INTO car_interest_daily VALUES (?, ?, 'dealer', ?, 3)",
-                             [(day(i % 20), f"CAR {i % 300}", i % 25) for i in range(3000)])
-            conn.execute("INSERT OR REPLACE INTO car_interest_daily VALUES (?, 'CARA', 'dealer', 1, 5)", (day(1),))
+            star = conn.execute("SELECT id FROM users WHERE username = 'star'").fetchone()[0]
+            conn.executemany("INSERT INTO user_activity (user_id, at_utc, action, detail) VALUES (?, ?, 'view_car', ?)",
+                             [(star, (NOW - timedelta(days=i % 20)).strftime("%Y-%m-%dT%H:%M:%S"), f"CAR {i % 300}") for i in range(3000)])
+            conn.executemany("INSERT INTO user_activity (user_id, at_utc, action, detail) VALUES (?, ?, 'view_car', 'CARA')", [(star, (NOW - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S"))] * 5)
         timings = {}
         for label, params in (("original", {"sort": "original"}), ("interest", {})):
             best = 9.0
