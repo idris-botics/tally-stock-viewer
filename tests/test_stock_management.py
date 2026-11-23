@@ -112,47 +112,11 @@ class StockMgmtBase(unittest.TestCase):
 
 
 class Settings(StockMgmtBase):
-    def test_defaults(self):
-        data = self.get("needs", section="low")
-        self.assertEqual(data["settings"], {"low_days": 14, "low_qty": 2, "order_cover_days": 30, "asked_max_items": 3, "include_admin": 1})
-
-    def test_saved_and_returned(self):
-        self.assertEqual(self.post("/settings", {"low_days": 20, "low_qty": 0, "order_cover_days": 45}).status_code, 200)
-        data = self.get("needs", section="low")
-        self.assertEqual((data["settings"]["low_days"], data["settings"]["low_qty"], data["settings"]["order_cover_days"]), (20, 0, 45))
-
-    def test_invalid_values_are_refused_with_short_fixed_messages(self):
-        for body in ({"low_days": 0}, {"low_days": 366}, {"low_days": "abc"}, {"low_days": True}, {"low_days": 1.5},
-                     {"low_qty": -1}, {"low_qty": 1001}, {"order_cover_days": 0}, {"order_cover_days": 366},
-                     {"include_admin": 2}, {"unknown_key": 1}, {}):
-            response = self.post("/settings", body)
-            self.assertEqual(response.status_code, 400, body)
-            message = response.get_json()["error"]
-            self.assertLess(len(message), 80)
-            self.assertNotIn("Traceback", message)
-        self.assertEqual(self.get("needs", section="low")["settings"]["low_days"], 14)   # nothing was saved
-
-    def test_a_bad_value_saves_nothing_even_if_another_is_good(self):
-        self.assertEqual(self.post("/settings", {"low_days": 30, "low_qty": 5000}).status_code, 400)
-        self.assertEqual(self.get("needs", section="low")["settings"]["low_days"], 14)
-
     def test_body_must_be_json(self):
         self.assertEqual(self.admin.post(BASE + "/settings", data="low_days=3").status_code, 400)
 
 
 class VelocityAndNeeds(StockMgmtBase):
-    def test_only_decreases_count_and_a_restock_is_ignored(self):
-        self.tracking_since(10)
-        self.in_stock(WIDGET=5)
-        self.event("WIDGET", 10, 8, 9)      # sold 2
-        self.event("WIDGET", 8, 5, 5)       # sold 3
-        self.event("WIDGET", 5, 20, 3)      # restock: not a negative sale, not a sale
-        self.event("WIDGET", 20, 18, 1)     # sold 2
-        row = self.get("needs", section="low")["rows"][0]
-        self.assertEqual(row["item_name"], "WIDGET")
-        self.assertEqual(row["speed"], 0.7)                         # 7 sold over the 10 days tracked
-        self.assertEqual(row["days_left"], 7)                       # 5 / 0.7 = 7.1
-
     def test_window_is_days_since_tracking_began_between_1_and_30(self):
         app = self.app_module
         self.assertEqual(app._stock_window_days(NOW - timedelta(hours=2)), 1)           # same day: at least 1
@@ -160,110 +124,9 @@ class VelocityAndNeeds(StockMgmtBase):
         self.assertEqual(app._stock_window_days(NOW - timedelta(days=400)), 30)
         self.assertEqual(app._stock_window_days(None), 1)
 
-    def test_sales_older_than_30_days_do_not_count(self):
-        self.tracking_since(200)
-        self.post("/settings", {"low_days": 365})
-        self.in_stock(WIDGET=10)
-        self.event("WIDGET", 100, 10, 45)       # 90 sold, but 45 days ago
-        self.event("WIDGET", 12, 10, 2)         # 2 sold in the window
-        row = self.get("needs", section="low")["rows"][0]
-        self.assertEqual(row["speed"], 0.1)                          # 2 / 30 days
-        self.assertEqual(row["days_left"], 150)
-
-    def test_running_low_by_days_left_and_by_quantity(self):
-        self.tracking_since(10)
-        self.in_stock(FAST=50, SLOW=100, FEW=2, PLENTY=10)
-        self.event("FAST", 100, 50, 2)           # 50 over 10 days = 5/day: 10 days left
-        self.event("SLOW", 110, 100, 2)          # 1/day: 100 days left
-        rows = self.get("needs", section="low")["rows"]
-        self.assertEqual(self.names(rows), ["FAST", "FEW"])          # days_left first, then the quantity-only item
-        self.assertEqual(rows[0]["days_left"], 10)
-        self.assertIsNone(rows[1]["days_left"])
-        self.assertTrue(rows[1]["no_recent_sales"])
-
-    def test_days_rule_needs_seven_days_of_history_but_the_quantity_rule_does_not(self):
-        self.tracking_since(3)
-        self.in_stock(FAST=5, FEW=1)
-        self.event("FAST", 50, 5, 1)             # would be about 0.3 days left, but only 3 days of history
-        self.assertEqual(self.names(self.get("needs", section="low")["rows"]), ["FEW"])
-
-    def test_low_sorting_is_by_days_left_then_quantity(self):
-        self.tracking_since(10)
-        self.in_stock(A=20, B=10, C=1, D=2)
-        self.event("A", 40, 20, 1)               # 2/day -> 10 days
-        self.event("B", 30, 10, 1)               # 2/day -> 5 days
-        self.assertEqual(self.names(self.get("needs", section="low")["rows"]), ["B", "A", "C", "D"])
-
-    def test_settings_change_what_is_low(self):
-        self.tracking_since(10)
-        self.in_stock(SLOW=100)
-        self.event("SLOW", 110, 100, 2)          # 100 days left
-        self.assertEqual(self.get("needs", section="low")["rows"], [])
-        self.post("/settings", {"low_days": 120})
-        self.assertEqual(self.names(self.get("needs", section="low")["rows"]), ["SLOW"])
-
-    def test_suggested_quantity_covers_the_cover_days(self):
-        self.tracking_since(10)
-        self.in_stock(FAST=5, FEW=1)
-        self.event("FAST", 55, 5, 1)             # 5/day; 30 days cover = 150; minus 5 in stock
-        rows = {r["item_name"]: r for r in self.get("needs", section="low")["rows"]}
-        self.assertEqual(rows["FAST"]["suggested_qty"], 145)
-        self.assertEqual(rows["FEW"]["suggested_qty"], 1)
-
-    def test_open_order_shows_a_badge_and_the_row_stays(self):
-        self.tracking_since(10)
-        self.in_stock(FEW=1)
-        self.sql("INSERT INTO restock_orders (item_key, item_name, qty_ordered, ordered_at_utc) VALUES ('FEW', 'FEW', 5, '2026-03-17T05:00:00')")
-        row = self.get("needs", section="low")["rows"][0]
-        self.assertEqual(row["open_order"]["ordered_on"], "2026-03-17")
-
-    def test_out_of_stock_relevant_items_only_unless_the_switch_is_on(self):
-        self.tracking_since(10)
-        self.in_stock(**{"CARB_ITEM_001": 1, "CARB_ITEM_002": 1, "CARB_ITEM_003": 1})
-        self.event("CARC ITEM 001", 4, 0, 2)                        # sold out and gone: relevant
-        self.views("CARA", "dealer", 3)                             # dealers open CARA: its items are relevant
-        rows = self.get("needs", section="out")["rows"]
-        self.assertEqual(sorted(self.names(rows)), ["CARA ITEM 001", "CARA ITEM 002", "CARA ITEM 003", "CARC ITEM 001"])
-        everything = self.get("needs", section="out", show_all=1)
-        self.assertEqual(everything["total"], 6)                    # CARA x3 + CARC x3 are out of stock (CARB is in stock)
-
-    def test_out_of_stock_sorted_by_selling_speed_then_interest(self):
-        self.tracking_since(10)
-        self.in_stock(**{"CARB_ITEM_001": 1})
-        self.event("CARC ITEM 001", 10, 0, 2)                       # sold 10
-        self.event("CARC ITEM 002", 30, 0, 2)                       # sold 30: faster
-        self.views("CARA", "dealer", 5)
-        rows = self.get("needs", section="out")["rows"]
-        self.assertEqual(self.names(rows)[:2], ["CARC ITEM 002", "CARC ITEM 001"])
-
-    def test_catalogue_search_and_the_100_row_cap(self):
-        pushed = self.anon.post("/admin/intake/sync_data", json=catalogue_payload(["BIGCAR"], 250), headers=INTAKE_HEADERS)
-        self.assertEqual(pushed.status_code, 200)
-        self.sql("DELETE FROM stock_state")                          # the push put every item in stock; make them all out of stock
-        self.app_module._stock_mgmt_cache_clear()
-        first = self.get("needs", section="out", show_all=1)
-        self.assertLessEqual(len(first["rows"]), 100)
-        self.assertTrue(first["more"])
-        total = first["total"]
-        last = self.get("needs", section="out", show_all=1, page=3)
-        self.assertEqual(len(last["rows"]), total - 200)
-        self.assertFalse(last["more"])
-        found = self.get("needs", section="out", show_all=1, q="bigcar item 250")
-        self.assertEqual(self.names(found["rows"]), ["BIGCAR ITEM 250"])
-
     def test_search_text_too_long_is_refused(self):
-        response = self.admin.get(BASE + "/data", query_string={"tab": "needs", "section": "out", "q": "x" * 81})
+        response = self.admin.get(BASE + "/data", query_string={"tab": "needs", "section": "sold", "q": "x" * 81})
         self.assertEqual(response.status_code, 400)
-
-    def test_banner_says_still_collecting_under_7_days(self):
-        self.tracking_since(3)
-        data = self.get("needs", section="low")
-        self.assertEqual(data["tracking"]["stock_days"], 3)
-        self.assertIn("Still collecting data", data["tracking"]["banner"])
-        self.assertIn("2026-03-17", data["tracking"]["banner"])
-        self.tracking_since(10)
-        self.app_module._stock_mgmt_cache_clear()
-        self.assertNotIn("Still collecting data", self.get("needs", section="low")["tracking"]["banner"])
 
 
 class OrderList(StockMgmtBase):
@@ -363,8 +226,10 @@ class OrderList(StockMgmtBase):
         self.assertEqual(self.draft()["total_items"], 1)
 
     def test_items_already_on_the_order_list_are_flagged_on_needs_restocking(self):
+        self.sql("INSERT INTO sales_lines VALUES ('aaaaaaaa', '2026-03-10', 'sale', 'CARA ITEM 001', 'CARA ITEM 001', 2)")
+        self.app_module._stock_mgmt_cache_clear()
         self.add("CARA ITEM 001", 5)
-        rows = {r["item_key"]: r for r in self.get("needs", section="out", show_all=1)["rows"]}
+        rows = {r["item_key"]: r for r in self.get("needs", section="sold")["rows"]}
         self.assertTrue(rows["CARA ITEM 001"]["on_order_list"])
 
 
@@ -673,7 +538,7 @@ class AdminOnly(StockMgmtBase):
     def test_admin_can_open_everything(self):
         for method, path in self.new_routes():
             if method == "GET":
-                response = self.admin.get(path, query_string={"tab": "needs", "section": "low"})
+                response = self.admin.get(path, query_string={"tab": "needs", "section": "sold"})
                 self.assertEqual(response.status_code, 200, path)
 
     def test_the_page_is_a_page(self):
@@ -712,7 +577,7 @@ class Performance(StockMgmtBase):
             conn.executemany("INSERT OR IGNORE INTO car_interest_daily VALUES (?, ?, 'dealer', ?, 2)",
                              [(day(i % 30), f"CAR {i % 700}", i % 40) for i in range(20000)])
         timings = []
-        for label, params in (("needs/low", {"tab": "needs", "section": "low"}), ("needs/out", {"tab": "needs", "section": "out", "show_all": 1}),
+        for label, params in (("needs/sold", {"tab": "needs", "section": "sold"}), ("needs/last", {"tab": "needs", "section": "last"}), ("needs/thin", {"tab": "needs", "section": "thin"}),
                               ("order", {"tab": "order"}), ("ordered", {"tab": "ordered"}), ("slow", {"tab": "slow", "days": 60}),
                               ("asked", {"tab": "asked", "show_all": 1}), ("asked/misses", {"tab": "asked", "block": "misses"})):
             self.app_module._stock_mgmt_cache_clear()

@@ -56,9 +56,9 @@
   "type": "application/json"
  },
  "admin_locked GET /admin/stock_mgmt": {
-  "body": "46212e454e",
+  "body": "88654413ef",
   "cache": "",
-  "len": 46928,
+  "len": 51539,
   "location": "",
   "status": 200,
   "type": "text/html"
@@ -984,9 +984,9 @@
   "type": "application/json"
  },
  "admin_unlocked GET /admin/stock_mgmt": {
-  "body": "46212e454e",
+  "body": "88654413ef",
   "cache": "",
-  "len": 46928,
+  "len": 51539,
   "location": "",
   "status": 200,
   "type": "text/html"

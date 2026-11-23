@@ -6209,7 +6209,7 @@ def _ist_day_minus(days):
 
 
 def _stock_item_key(name):
-    return re.sub(r"\s+", " ", str(name or "")).strip().upper()
+    return " ".join(str(name or "").split()).upper()            # the same as collapsing whitespace, stripping and upper-casing, but faster
 
 
 def _stock_in_stock_map(item_stock_clean):
@@ -6477,12 +6477,17 @@ STOCK_MGMT_MAX_SEARCH = 80
 STOCK_MGMT_MAX_LINES = 2000
 STOCK_MGMT_TABS = ("needs", "order", "ordered", "slow", "asked")
 STOCK_MGMT_SETTING_LIMITS = {          # key -> (lowest, highest, default)
-    "low_days": (1, 365, 14),
-    "low_qty": (0, 1000, 2),
-    "order_cover_days": (1, 365, 30),
-    "asked_max_items": (0, 1000, 3),
-    "include_admin": (0, 1, 1),
+    "keep_max": (1, 10, 3),                # the most pieces the shop keeps of one design
+    "min_sold": (1, 50, 1),                # units a sold-out design must have sold in the window to be listed
+    "window_days": (30, 365, 90),          # only 30, 90 or 365 (STOCK_MGMT_WINDOW_CHOICES)
+    "last_piece_min_sold": (1, 50, 2),     # units a last piece must have sold in the last 180 days
+    "thin_ratio_percent": (10, 90, 50),    # a car is thin at or under this share of its active designs in stock
+    "thin_min_designs": (2, 50, 4),        # a car needs at least this many active designs to be called thin
+    "show_last_piece": (0, 1, 1),
+    "include_admin": (0, 1, 1),            # admin opens count towards a car's interest
+    "asked_max_items": (0, 1000, 3),       # only the old Asked-for code reads this
 }
+STOCK_MGMT_WINDOW_CHOICES = (30, 90, 365)
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 _STOCK_MGMT_LOCK = threading.Lock()          # guards the small result cache
@@ -6571,7 +6576,7 @@ def _stock_mgmt_settings(conn):
             number = int(value)
         except (TypeError, ValueError):
             continue
-        if spec is not None and spec[0] <= number <= spec[1]:
+        if spec is not None and spec[0] <= number <= spec[1] and (key != "window_days" or number in STOCK_MGMT_WINDOW_CHOICES):
             values[key] = number
     return values
 
@@ -6597,9 +6602,13 @@ def _stock_date_text(value, allow_empty=False):
     return value
 
 
+_STOCK_HAS_LETTER = re.compile(r"[A-Z]")
+_STOCK_TOTAL_LINE = re.compile(r"(GRAND )?TOTAL\b")
+
+
 def _stock_is_real_item(key):
     """Hierarchy children that are real items: has a letter, and is not a total line."""
-    return bool(re.search(r"[A-Z]", key)) and not re.match(r"(GRAND )?TOTAL\b", key)
+    return bool(_STOCK_HAS_LETTER.search(key)) and not _STOCK_TOTAL_LINE.match(key)
 
 
 def _stock_catalogue():
@@ -6659,10 +6668,6 @@ def _stock_suggested_qty(speed, qty_now, cover_days):
     return 1
 
 
-def _stock_days_left_text(value):
-    return None if value is None else int(math.floor(value + 0.5))
-
-
 def _stock_car_of(item_key, catalogue):
     """The car an item is listed under on the Needs restocking tab: the first car in the hierarchy that has it."""
     entry = catalogue["items"].get(item_key)
@@ -6705,57 +6710,136 @@ def _stock_car_interest(conn, include_admin):
     return counts
 
 
-def _stock_tab_needs(conn, section, q, page, show_all):
-    settings = _stock_mgmt_settings(conn)
-    tracking = _stock_tracking_info(conn)
-    window = _stock_window_days(_parse_utc(_capture_meta_get(conn, "stock_tracking_started_at_utc")))
-    sold = _stock_sales(conn)
+STOCK_NEEDS_SECTIONS = ("sold", "last", "thin")
+_SALES_NET = "CASE WHEN kind = 'sale' THEN qty ELSE -qty END"
+
+
+def _ordinal(day_text):
+    try:
+        return datetime.fromisoformat(day_text).toordinal() if day_text else 0
+    except ValueError:
+        return 0
+
+
+def _stock_needs_compute(conn, settings):
+    """Everything the three Needs-restocking lists are made of, from the sales lines the shop pushes, the stock now, the
+    stock changes the site has seen and the car interest in the Usage Charts activity log. Net sold = units sold minus
+    units returned, never below 0. Computed once per (data, settings) and cached by the caller."""
     state = _stock_state_map(conn)
+    catalogue = _stock_catalogue()
     orders = _stock_open_orders(conn)
     on_list = {row[0] for row in conn.execute("SELECT item_key FROM restock_draft")}
-    cover = settings["order_cover_days"]
-    query = _stock_item_key(q)
-    rows = []
-    catalogue = _stock_catalogue()
-    if section == "low":
+    today = _today_ist_date()
+    window = settings["window_days"]
+    d_window, d90, d180, d365 = (_ist_day_minus(n - 1) for n in (window, 90, 180, 365))
+    sales = {}
+    for key, name, net_w, net_90, net_180, net_365, last in conn.execute(
+            f"SELECT item_key, MAX(item_name), SUM(CASE WHEN day >= ? THEN {_SALES_NET} ELSE 0 END), "
+            f"SUM(CASE WHEN day >= ? THEN {_SALES_NET} ELSE 0 END), SUM(CASE WHEN day >= ? THEN {_SALES_NET} ELSE 0 END), "
+            f"SUM({_SALES_NET}), MAX(CASE WHEN kind = 'sale' THEN day END) FROM sales_lines WHERE day >= ? GROUP BY item_key",
+            (d_window, d90, d180, d365)):
+        sales[key] = {"name": name, "w": max(0, net_w), "n90": max(0, net_90), "n180": max(0, net_180), "n365": net_365, "last": last}
+    first_day = conn.execute("SELECT MIN(day) FROM sales_lines").fetchone()[0]
+    covers = first_day is not None and first_day <= d_window       # the sales history reaches back over the whole window
+    zero_events = {row[0]: (row[1], row[2]) for row in conn.execute(
+        "SELECT item_key, MAX(item_name), MAX(day_ist) FROM stock_events WHERE qty_after = 0 AND qty_before > 0 GROUP BY item_key")}
+    usual = {}
+    for key, after in conn.execute("SELECT item_key, qty_after FROM stock_events WHERE qty_after > qty_before AND day_ist >= ? ORDER BY day_ist, id", (d365,)):
+        usual[key] = after                                         # the last one wins: the most recent restock
+    keep_max = settings["keep_max"]
+
+    def suggested(key):
+        if key in usual:
+            return min(keep_max, max(1, usual[key]))
+        return min(keep_max, max(1, int(math.ceil((sales.get(key) or {}).get("n90", 0) / 3.0))))
+
+    def make_row(key, name, sold, window_days, last, since):
+        entry = catalogue["items"].get(key)
+        return {"item_key": key, "item_name": entry[0] if entry else name or key, "car": _stock_car_of(key, catalogue), "sold": sold,
+                "window_days": window_days, "last_sold": last, "sold_out_since": since, "open_order": orders.get(key),
+                "on_order_list": key in on_list, "suggested_qty": suggested(key)}
+
+    # 1. sold out: not in stock, sold enough in the window (or, with no sales covering the window, dropped to zero in it)
+    candidates = {}
+    for key, rec in sales.items():
+        if key not in state and rec["w"] >= settings["min_sold"]:
+            candidates[key] = rec["name"]
+    if not covers:
+        for key, (name, zero_day) in zero_events.items():
+            if key not in state and key not in candidates and zero_day >= d_window:
+                candidates[key] = (sales.get(key) or {}).get("name") or name
+    sold_rows = []
+    for key, name in candidates.items():
+        rec = sales.get(key) or {}
+        net = rec.get("w", 0)
+        since = zero_events.get(key, (None, None))[1]
+        sold_rows.append(((-net, -_ordinal(rec.get("last")), key), make_row(key, name, net, window, rec.get("last"), since)))
+    sold_rows = _stock_group_rows(sold_rows)
+
+    # 2. last piece: one left, and it sells
+    last_rows = []
+    if settings["show_last_piece"]:
         for key, (name, qty) in state.items():
-            if query and query not in key:
-                continue
-            speed = sold.get(key, 0) / window
-            days_left = qty / speed if speed > 0 else None
-            by_days = days_left is not None and tracking["stock_days"] >= STOCK_MGMT_MIN_HISTORY_DAYS and days_left <= settings["low_days"]
-            if not (by_days or qty <= settings["low_qty"]):
-                continue
-            rows.append(((days_left if days_left is not None else float("inf"), qty, key), {
-                "item_key": key, "item_name": name, "car": _stock_car_of(key, catalogue), "qty": qty, "speed": round(speed, 1),
-                "days_left": _stock_days_left_text(days_left), "no_recent_sales": speed <= 0,
-                "open_order": orders.get(key), "on_order_list": key in on_list,
-                "suggested_qty": _stock_suggested_qty(speed, qty, cover)}))
-        rows = _stock_group_rows(rows)
+            rec = sales.get(key)
+            if qty == 1 and rec and rec["n180"] >= settings["last_piece_min_sold"]:
+                last_rows.append(((-rec["n180"], -_ordinal(rec["last"]), key), make_row(key, name, rec["n180"], 180, rec["last"], None)))
+    last_rows = _stock_group_rows(last_rows)
+
+    # 3. cars running thin: few of the designs that are alive (in stock, or sold in the last year) are in stock
+    interest = _stock_car_interest(conn, bool(settings["include_admin"]))
+    thin = []
+    for car_key, (car_name, item_keys) in catalogue["cars"].items():
+        active = [k for k in item_keys if k in state or (k in sales and sales[k]["n365"] > 0)]
+        if len(active) < settings["thin_min_designs"]:
+            continue
+        in_stock = sum(1 for k in active if k in state)
+        if in_stock * 100 <= settings["thin_ratio_percent"] * len(active):
+            opens = interest.get(car_key, 0)
+            thin.append(((-opens, in_stock / len(active), car_name), {
+                "car_key": car_key, "car_name": car_name, "in_stock": in_stock, "active": len(active), "sold_out": len(active) - in_stock, "opens": opens}))
+    thin.sort(key=lambda pair: pair[0])
+
+    def car_items(car_key):
+        entry = catalogue["cars"].get(car_key)
+        rows = []
+        for key in (entry[1] if entry else []):
+            if key not in state and key in sales and sales[key]["n365"] > 0:
+                rec = sales[key]
+                rows.append(((-rec["w"], -_ordinal(rec["last"]), key), make_row(key, rec["name"], rec["w"], window, rec["last"], zero_events.get(key, (None, None))[1])))
+        rows.sort(key=lambda pair: pair[0])
+        return [row for _key, row in rows]
+
+    tracking = _stock_tracking_info(conn)
+    if first_day:
+        days = max(0, (today - datetime.strptime(first_day, "%Y-%m-%d").date()).days)
+        banner = {"text": f"Sales history from {first_day} ({_plural(days, 'day')}).", "calm": days >= 90}
+    elif tracking["stock_since"]:
+        banner = {"text": f"No sales history yet. This list uses stock changes seen since {tracking['stock_since']}.", "calm": False}
     else:
-        interest = _stock_car_interest(conn, bool(settings["include_admin"]))
-        names = {row[0]: row[1] for row in conn.execute("SELECT item_key, MAX(item_name) FROM stock_events GROUP BY item_key")}
-        if show_all:
-            candidates = set(catalogue["items"]) | set(names)
-        else:
-            candidates = set(names)
-            for car_key, opens in interest.items():
-                if opens > 0 and car_key in catalogue["cars"]:
-                    candidates.update(catalogue["cars"][car_key][1])
-        for key in candidates:
-            if key in state or (query and query not in key):
-                continue
-            entry = catalogue["items"].get(key)
-            name = entry[0] if entry else names.get(key) or key
-            speed = sold.get(key, 0) / window
-            asked = sum(interest.get(car, 0) for car in (entry[1] if entry else ()))
-            rows.append(((-speed, -asked, key), {
-                "item_key": key, "item_name": name, "car": _stock_car_of(key, catalogue), "qty": 0, "speed": round(speed, 1), "asked": asked,
-                "open_order": orders.get(key), "on_order_list": key in on_list,
-                "suggested_qty": _stock_suggested_qty(speed, 0, cover)}))
-        rows = _stock_group_rows(rows)
+        banner = {"text": "No sales history yet. Stock changes have not been recorded yet.", "calm": False}
+    return {"sold": sold_rows, "last": last_rows, "thin": [row for _key, row in thin], "car_items": car_items, "banner": banner,
+            "tracking": tracking, "settings": settings}
+
+
+def _stock_tab_needs(conn, section, q, page, block, car):
+    settings = _stock_mgmt_settings(conn)
+    data = _stock_mgmt_cached(("needs_all", get_data_versions()["data_version"]), lambda: _stock_needs_compute(conn, settings))
+    query = _stock_item_key(q)
+
+    def keep_items(rows):
+        if not query:
+            return rows
+        return [r for r in rows if query in r["item_key"] or query in _stock_item_key(r["car"])]
+
+    lists = {"sold": keep_items(data["sold"]), "last": keep_items(data["last"]),
+             "thin": [r for r in data["thin"] if not query or query in r["car_key"]]}
+    if block == "car_items":
+        rows = data["car_items"](_stock_item_key(car))
+    else:
+        rows = lists[section]
     payload = _stock_page(rows, page)
-    payload.update(tab="needs", section=section, settings=settings, tracking=tracking, show_all=bool(show_all))
+    payload.update(tab="needs", section=section, block=block, totals={name: len(rows_) for name, rows_ in lists.items()},
+                   settings=data["settings"], tracking=data["tracking"], banner=data["banner"])
     return payload
 
 
@@ -6885,7 +6969,7 @@ def _stock_tab_asked(conn, block, q, page, car, max_items, include_admin, show_a
             name = catalogue["items"][item_key][0]
             rows.append((name, {"item_key": item_key, "item_name": name, "speed": round(speed, 1), "open_order": orders.get(item_key),
                                 "on_order_list": item_key in on_list,
-                                "suggested_qty": _stock_suggested_qty(speed, 0, settings["order_cover_days"])}))
+                                "suggested_qty": _stock_suggested_qty(speed, 0, 30)}))
         rows.sort(key=lambda r: r[0])
         payload = _stock_page([r[1] for r in rows], page)
         payload["items"] = payload.pop("rows")
@@ -6933,8 +7017,8 @@ def _stock_mgmt_args():
     page = args.get("page", 1, type=int)
     if page is None or page < 1 or page > 10000:
         raise _StockMgmtError("Invalid page")
-    section = args.get("section", "low")
-    if section not in ("low", "out"):
+    section = args.get("section", "sold")
+    if section not in STOCK_NEEDS_SECTIONS:
         raise _StockMgmtError("Unknown section")
     days = args.get("days", 60, type=int)
     if days not in (60, 90):
@@ -6989,7 +7073,7 @@ def stock_mgmt_data():
             with db.get_connection() as conn:
                 tab = params["tab"]
                 if tab == "needs":
-                    return _stock_tab_needs(conn, params["section"], params["q"], params["page"], params["show_all"])
+                    return _stock_tab_needs(conn, params["section"], params["q"], params["page"], params["block"], params["car"])
                 if tab == "order":
                     return _stock_tab_order(conn)
                 if tab == "ordered":
@@ -7109,6 +7193,8 @@ def stock_mgmt_settings_save():
             if spec is None:
                 raise _StockMgmtError("Unknown setting")
             number = _stock_whole(value, spec[0], spec[1])
+            if key == "window_days" and number not in STOCK_MGMT_WINDOW_CHOICES:
+                raise _StockMgmtError("window_days must be 30, 90 or 365")
             if number is None:
                 raise _StockMgmtError(f"{key} must be a whole number from {spec[0]} to {spec[1]}")
             clean[key] = number
@@ -7144,8 +7230,8 @@ def _stock_set_last_action(conn, action):
 def _stock_item_is_known(conn, key):
     if key in _stock_catalogue()["items"]:
         return True
-    return conn.execute("SELECT 1 FROM stock_state WHERE item_key = ? UNION SELECT 1 FROM stock_events WHERE item_key = ? LIMIT 1",
-                        (key, key)).fetchone() is not None
+    return conn.execute("SELECT 1 FROM stock_state WHERE item_key = ? UNION SELECT 1 FROM stock_events WHERE item_key = ? "
+                        "UNION SELECT 1 FROM sales_lines WHERE item_key = ? LIMIT 1", (key, key, key)).fetchone() is not None
 
 
 def _stock_note(value):

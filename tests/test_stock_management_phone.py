@@ -78,7 +78,7 @@ class PhoneUi(unittest.TestCase):
         self.app_module._stock_mgmt_cache_clear()
         long_names = [f"{car} {n}D MAT PREMIUM SEAT COVER BLACK/RED {n}" for car in ("ALTO K10 (2014-2019) LONG NAME FOR WRAPPING", "SWIFT", "CRETA") for n in range(1, 7)]
         with self.db.get_connection() as conn:
-            for table in ("stock_state", "stock_events", "capture_meta", "restock_draft", "restock_orders", "stock_mgmt_settings"):
+            for table in ("stock_state", "stock_events", "capture_meta", "restock_draft", "restock_orders", "stock_mgmt_settings", "sales_lines"):
                 conn.execute(f"DELETE FROM {table}")
             conn.execute("INSERT INTO capture_meta VALUES ('stock_tracking_started_at_utc', ?)", ((NOW - timedelta(days=12)).strftime("%Y-%m-%dT%H:%M:%S"),))
             for i, name in enumerate(long_names):
@@ -87,6 +87,8 @@ class PhoneUi(unittest.TestCase):
                     conn.execute("INSERT INTO stock_state VALUES (?, ?, ?, 'x')", (key, name, [1, 2, 3, 9, 14, 40][i % 6]))
                 conn.execute("INSERT INTO stock_events (day_ist, item_key, item_name, qty_before, qty_after, at_utc) VALUES (?, ?, ?, ?, ?, 'x')",
                              (day(3 + i % 5), key, name, 30, 30 - (4 + i * 2) if i % 3 != 2 else 0))
+                # every design sold a little in the last weeks: the ones not in stock are "Sold out", qty-1 ones are "Last piece"
+                conn.execute("INSERT INTO sales_lines VALUES (?, ?, 'sale', ?, ?, ?)", (f"{i:08x}", day(1 + i % 10), key, name, 2 + i % 4))
             conn.execute("INSERT INTO restock_orders (item_key, item_name, qty_ordered, ordered_at_utc, expected_date) VALUES (?, ?, 12, '2026-03-10T05:00:00', '2026-03-15')",
                          (long_names[0].upper(), long_names[0]))
             conn.execute("INSERT INTO restock_orders (item_key, item_name, qty_ordered, ordered_at_utc, expected_date) VALUES (?, ?, 5, '2026-03-18T05:00:00', '2026-04-02')",
@@ -193,23 +195,22 @@ class PhoneUi(unittest.TestCase):
         untitled = page.evaluate("""() => Array.from(document.querySelectorAll('#panel button, #tabs button, #refreshBtn'))
             .filter(e => e.getBoundingClientRect().width > 0 && !(e.getAttribute('title') || '').trim()).map(e => e.textContent.trim().slice(0, 30))""")
         self.assertEqual(untitled, [], "every button needs hover text")
-        self.assertIn("Estimates only", page.locator("#panel").inner_text())            # the disclaimer is on the page
+        self.assertIn("Always check before you order", page.locator("#panel").inner_text())            # the disclaimer is on the page
 
     def test_a_search_jumps_to_the_list_that_has_the_matches(self):
-        """Typing a car that only has sold-out items while on Running low must not show an empty list."""
+        """A design that is only a Last piece must not leave you looking at an empty Sold out list."""
         page = self.open("phone-390", "needs")
-        self.assertEqual(page.locator(".tile[aria-pressed=true]").inner_text().split(chr(10))[-1], "Running low")
-        page.fill("input[aria-label=Search]", "ALTO K10 (2014-2019) LONG NAME FOR WRAPPING 3D")
-        page.press("input[aria-label=Search]", "Enter")
-        page.wait_for_function("(document.querySelector('.tile[aria-pressed=true]') || {textContent: ''}).textContent.includes('Sold out')")
         self.assertIn("Sold out", page.locator(".tile[aria-pressed=true]").inner_text())
-        self.assertIn("running low", page.locator("#panel .notice.info").inner_text())
+        page.fill("input[aria-label=Search]", "ALTO K10 (2014-2019) LONG NAME FOR WRAPPING 1D MAT PREMIUM SEAT COVER BLACK/RED 1")
+        page.press("input[aria-label=Search]", "Enter")
+        page.wait_for_function("(document.querySelector('.tile[aria-pressed=true]') || {textContent: ''}).textContent.includes('Last piece')")
+        self.assertIn("which does", page.locator("#panel .notice.info").inner_text())
         page.locator("#panel details.bin > summary").first.click()
-        self.assertIn("3D MAT", page.locator("#panel details.bin").first.inner_text())
+        self.assertIn("only 1 left", page.locator("#panel details.bin").first.inner_text())
         # tapping the other card shows where the matches are instead of an unexplained empty list
-        page.locator(".tile", has_text="Running low").click()
+        page.locator(".tile", has_text="Sold out").click()
         page.wait_for_selector("#panel .empty")
-        self.assertIn("match in “Sold out”", page.locator("#panel .empty").inner_text())
+        self.assertIn("matches in \u201cLast piece\u201d", page.locator("#panel .empty").inner_text())
 
     def test_the_search_has_a_clear_button_and_the_old_extras_are_gone(self):
         page = self.open("phone-390", "needs")
@@ -240,7 +241,7 @@ class PhoneUi(unittest.TestCase):
         self.assertEqual(bins.first.get_attribute("open"), "")
 
     def test_a_long_list_adds_cars_in_big_steps(self):
-        """140 low items over 70 cars: 30 cars first, then 50 more per tap, with no car split or lost."""
+        """140 sold-out designs over 70 cars: 30 cars first, then 50 more per tap, with no car split or lost."""
         hierarchy, stock, names = [], [], []
         for c in range(70):
             car = f"LONGCAR{c:02d}"
@@ -254,7 +255,9 @@ class PhoneUi(unittest.TestCase):
         self.assertEqual(support.client_for("anonymous").post("/admin/intake/sync_data", json=pushed, headers=dict(INTAKE_HEADERS, **{"X-Intake-Force": "1"})).status_code, 200)
         with self.db.get_connection() as conn:
             conn.execute("DELETE FROM stock_state")
-            conn.executemany("INSERT INTO stock_state VALUES (?, ?, 1, 'x')", [(row["item_name"].upper(), row["item_name"]) for row in stock])
+            conn.execute("DELETE FROM stock_events")                  # the page fixture's old stock changes would add cars of their own
+            conn.execute("DELETE FROM sales_lines")
+            conn.executemany("INSERT INTO sales_lines VALUES (?, '2026-03-10', 'sale', ?, ?, 2)", [(f"{n:08x}", row["item_name"].upper(), row["item_name"]) for n, row in enumerate(stock)])
         self.app_module._stock_mgmt_cache_clear()
         page = self.open("phone-390", "needs")
         page.wait_for_function("document.querySelectorAll('#panel details.bin').length === 30")
@@ -267,12 +270,17 @@ class PhoneUi(unittest.TestCase):
         titles = page.evaluate("Array.from(document.querySelectorAll('#panel details.bin summary b')).map(e => e.textContent)")
         self.assertEqual(len(set(titles)), 70)                                                          # no car shown twice or lost
 
-    def test_there_is_no_settings_box_and_a_short_list_has_no_more_button(self):
+    def test_settings_are_at_the_top_and_save_and_a_short_list_has_no_more_button(self):
         page = self.open("phone-390", "needs")
-        text = page.locator("#panel").inner_text()
-        self.assertNotIn("Settings", text)
-        self.assertNotIn("Save settings", text)
-        self.assertEqual(page.locator("text=Show more").count(), 0)
+        self.assertEqual(page.locator("#panel > details.settings").count(), 1)
+        self.assertEqual(page.evaluate("document.querySelector('#panel').firstElementChild.className"), "settings")        # the very first thing on the tab
+        self.assertEqual(page.locator("#panel button", has_text="more cars").count(), 0)
+        page.locator("#panel details.settings > summary").click()
+        page.fill("#panel details.settings input[type=number] >> nth=0", "2")                                             # most pieces you keep
+        page.locator("#panel details.settings button", has_text="Save settings").click()
+        page.wait_for_selector("#msg.success")
+        with self.db.get_connection() as conn:
+            self.assertEqual(conn.execute("SELECT value FROM stock_mgmt_settings WHERE key = 'keep_max'").fetchone()[0], "2")
 
     def test_the_tab_counts_show(self):
         page = self.open("phone-390", "needs")
