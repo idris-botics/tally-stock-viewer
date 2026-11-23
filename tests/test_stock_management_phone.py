@@ -71,7 +71,7 @@ class PhoneUi(unittest.TestCase):
         support.restore_state(cls.snapshot)
 
     def setUp(self):
-        self.assertEqual(support.client_for("anonymous").post("/admin/intake/sync_data", json=payload(), headers=INTAKE_HEADERS).status_code, 200)
+        self.assertEqual(support.client_for("anonymous").post("/admin/intake/sync_data", json=payload(), headers=dict(INTAKE_HEADERS, **{"X-Intake-Force": "1"})).status_code, 200)   # a fixture push, whatever an earlier test left
         patcher = mock.patch.object(self.app_module, "_stock_now_utc", return_value=NOW)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -138,6 +138,8 @@ class PhoneUi(unittest.TestCase):
         for size in SIZES:
             for tab in ("needs", "order", "ordered", "slow"):
                 page = self.open(size, tab)
+                for summary in page.locator("#panel details.bin > summary").all():      # cars start closed: open them so their rows are checked too
+                    summary.click()
                 self.shot(page, f"{size}-{tab}")
                 found = self.problems(page)
                 self.assertEqual(found, [], f"{size} / {tab}: {found}")
@@ -167,6 +169,7 @@ class PhoneUi(unittest.TestCase):
 
     def test_stepper_add_and_remove_work_by_tapping(self):
         page = self.open("phone-390", "needs")
+        page.locator("#panel details.bin > summary").first.click()                  # cars start closed
         first = page.locator("#panel .item", has=page.locator("button:has-text('Add to order list')")).first
         item = page.locator("#panel .item", has_text=first.locator(".name").inner_text()).first     # pinned by name: its button text changes
         before = int(item.locator("input[type=number]").input_value())
@@ -201,6 +204,7 @@ class PhoneUi(unittest.TestCase):
         page.wait_for_function("(document.querySelector('.tile[aria-pressed=true]') || {textContent: ''}).textContent.includes('Sold out')")
         self.assertIn("Sold out", page.locator(".tile[aria-pressed=true]").inner_text())
         self.assertIn("running low", page.locator("#panel .notice.info").inner_text())
+        page.locator("#panel details.bin > summary").first.click()
         self.assertIn("3D MAT", page.locator("#panel details.bin").first.inner_text())
         # tapping the other card shows where the matches are instead of an unexplained empty list
         page.locator(".tile", has_text="Running low").click()
@@ -222,6 +226,46 @@ class PhoneUi(unittest.TestCase):
         self.assertFalse(page.locator("button[aria-label='Clear search']").is_visible())
         box = page.locator(".search .field input").bounding_box()
         self.assertGreaterEqual(box["height"], 44)
+
+    def test_every_car_is_listed_and_starts_closed(self):
+        page = self.open("phone-390", "needs")
+        bins = page.locator("#panel details.bin")
+        self.assertEqual(bins.count(), 3)                                              # all three cars are there
+        for index in range(bins.count()):
+            self.assertIsNone(bins.nth(index).get_attribute("open"))                   # and every one is closed
+        self.assertEqual(page.locator("#panel .item").count(), 0)                      # rows are only built when a car is opened
+        self.assertEqual(page.locator("text=Show more").count(), 0)
+        bins.first.locator("summary").click()
+        self.assertGreaterEqual(page.locator("#panel .item").count(), 1)
+        self.assertEqual(bins.first.get_attribute("open"), "")
+
+    def test_a_long_list_still_shows_every_car(self):
+        """More than 100 low items arrive from the server in pages; every car must still be in the list."""
+        hierarchy, stock, names = [], [], []
+        for c in range(70):
+            car = f"LONGCAR{c:02d}"
+            names.append(car)
+            hierarchy.append({"item_name": car, "qty": 2})
+            for n in (1, 2):
+                hierarchy.append({"item_name": f"{car} ITEM {n}", "qty": 1})
+                stock.append({"item_name": f"{car} ITEM {n}", "qty": 1})
+            hierarchy.append({"item_name": "", "qty": ""})
+        pushed = {"car_master": names, "main_hierarchy": hierarchy, "item_stock": stock}
+        self.assertEqual(support.client_for("anonymous").post("/admin/intake/sync_data", json=pushed, headers=dict(INTAKE_HEADERS, **{"X-Intake-Force": "1"})).status_code, 200)
+        with self.db.get_connection() as conn:
+            conn.execute("DELETE FROM stock_state")
+            conn.executemany("INSERT INTO stock_state VALUES (?, ?, 1, 'x')", [(row["item_name"].upper(), row["item_name"]) for row in stock])
+        self.app_module._stock_mgmt_cache_clear()
+        page = self.open("phone-390", "needs")
+        page.wait_for_function("document.querySelectorAll('#panel details.bin').length === 70")      # 140 items = two pages, all 70 cars
+        self.assertEqual(page.locator("text=Show more").count(), 0)
+
+    def test_there_is_no_settings_box_and_no_show_more_button(self):
+        page = self.open("phone-390", "needs")
+        text = page.locator("#panel").inner_text()
+        self.assertNotIn("Settings", text)
+        self.assertNotIn("Save settings", text)
+        self.assertEqual(page.locator("text=Show more").count(), 0)
 
     def test_the_tab_counts_show(self):
         page = self.open("phone-390", "needs")

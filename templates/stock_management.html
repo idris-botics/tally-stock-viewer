@@ -169,7 +169,7 @@
     var BASE = "/admin/stock_mgmt";
     var tabNames = ["needs", "order", "ordered", "slow"];
     var current = "needs";
-    var ui = { needs: { view: "low", showAll: false, q: "", lowPages: 1, outPages: 1 }, slow: { days: 60, q: "", page: 1 }, ordered: { page: 1 }, open: {} };
+    var ui = { needs: { view: "low", showAll: false, q: "" }, slow: { days: 60, q: "", page: 1 }, ordered: { page: 1 }, open: {} };
     var panel = document.getElementById("panel");
     var banner = document.getElementById("banner");
     var toast = document.getElementById("msg");
@@ -328,9 +328,9 @@
         });
         return groups;
     }
-    function bin(view, group, lowDays, startOpen) {
+    function bin(view, group, lowDays) {
         var id = view + "|" + group.car;
-        var isOpen = id in ui.open ? ui.open[id] : startOpen;
+        var isOpen = ui.open[id] === true;      // every car starts closed
         var urgentCount = group.rows.filter(function (r) { return view === "out" || (r.days_left !== null && r.days_left <= 3) || r.qty <= 1; }).length;
         var soonest = null;
         group.rows.forEach(function (r) { if (r.days_left !== null && (soonest === null || r.days_left < soonest)) { soonest = r.days_left; } });
@@ -339,20 +339,25 @@
         var details = el("details", { class: "bin", title: "Tap to show or hide the items for this car" }, [
             el("summary", {}, [el("span", { class: "caret" }), el("div", { class: "car" }, [el("b", { text: group.car }), el("span", { text: line })]),
                 el("span", { class: "pill " + (urgentCount ? "bad" : "warn"), text: String(group.rows.length), title: group.rows.length + " items for this car" })]),
-            el("div", { class: "inner" }, group.rows.map(function (row) { return view === "out" ? outRow(row) : lowRow(row, lowDays); }))]);
-        if (isOpen) { details.setAttribute("open", ""); }
-        details.addEventListener("toggle", function () { ui.open[id] = details.open; });
+            el("div", { class: "inner" })]);
+        var inner = details.querySelector(".inner");
+        function fill() {      // the item rows are built only when a car is opened, so a long list stays quick on a phone
+            if (inner.firstChild) { return; }
+            group.rows.forEach(function (row) { inner.appendChild(view === "out" ? outRow(row) : lowRow(row, lowDays)); });
+        }
+        if (isOpen) { fill(); details.setAttribute("open", ""); }
+        details.addEventListener("toggle", function () { ui.open[id] = details.open; if (details.open) { fill(); } });
         return details;
     }
-    async function pagesOf(base, count) {
-        var all = [], last = null;
-        for (var page = 1; page <= count; page += 1) {
+    async function loadAll(base, first) {
+        // The server sends 100 items at a time; fetch the rest so every car is in the list.
+        var rows = first.rows.slice(), last = first, page = 1;
+        while (last.more && page < 80) {
+            page += 1;
             last = await getData(Object.assign({}, base, { page: page }));
-            all = all.concat(last.rows);
-            if (!last.more) { break; }
+            rows = rows.concat(last.rows);
         }
-        last.rows = all;
-        return last;
+        return Object.assign({}, last, { rows: rows, more: false });
     }
     async function renderNeeds() {
         var s = ui.needs;
@@ -370,10 +375,10 @@
                 if (here === 0 && there > 0) { s.view = s.view === "low" ? "out" : "low"; switchedFor = s.q; }
             }
         }
-        var data = s.view === "low" ? (s.lowPages > 1 ? await pagesOf({ tab: "needs", section: "low", q: s.q }, s.lowPages) : lowFirst)
-                                    : (s.outPages > 1 ? await pagesOf({ tab: "needs", section: "out", q: s.q, show_all: s.showAll ? 1 : 0 }, s.outPages) : outFirst);
+        var data = s.view === "low" ? await loadAll({ tab: "needs", section: "low", q: s.q }, lowFirst)
+                                    : await loadAll({ tab: "needs", section: "out", q: s.q, show_all: s.showAll ? 1 : 0 }, outFirst);
         setBanner(lowFirst.tracking);
-        var settings = lowFirst.settings, fields = {};
+        var settings = lowFirst.settings;
         var urgentNow = lowFirst.rows.filter(function (r) { return (r.days_left !== null && r.days_left <= 3) || r.qty <= 1; }).length;
         var tile = function (key, big, label, hint, kind) {
             return el("button", { type: "button", class: "tile " + (kind || ""), "aria-pressed": s.view === key ? "true" : "false", title: hint, onclick: function () {
@@ -384,7 +389,7 @@
             tile("low", lowFirst.total, "Running low", "Items still in stock but close to running out. Tap to show them.", lowFirst.total ? "soon" : ""),
             tile("out", outFirst.total, "Sold out", "Items at zero that sold before or belong to a car dealers opened. Tap to show them.", outFirst.total ? "urgent" : ""),
             tile("order", orderCount, "On order list", "Items you have already picked to order. Tap to open the order list.", "")]);
-        var search = searchBox(s.q, function (value) { s.q = value; s.lowPages = 1; s.outPages = 1; s.pickView = true; load(); }, "Search an item or car", "Type part of an item name or car, then press Search. If nothing matches here, it jumps to the list that has matches.");
+        var search = searchBox(s.q, function (value) { s.q = value; s.pickView = true; load(); }, "Search an item or car", "Type part of an item name or car, then press Search. If nothing matches here, it jumps to the list that has matches.");
         var toolsChildren = [search];
         var groups = groupsOf(data.rows);
         var list = el("div", {});
@@ -399,26 +404,10 @@
             list.appendChild(s.view === "low" ? emptyState(s.q ? "No match in Running low" : "Nothing is running low", s.q ? hint : "Every item has enough stock for now.")
                                               : emptyState(s.showAll || s.q ? "No match in Sold out" : "Nothing sold out needs attention", s.q ? hint : (s.showAll ? "Try a different search." : "Sold-out items appear here once they have sold before.")));
         }
-        groups.forEach(function (group, i) { list.appendChild(bin(s.view, group, settings.low_days, groups.length <= 3 || i === 0)); });
-        var more = moreButton(data, function () { if (s.view === "low") { s.lowPages += 1; } else { s.outPages += 1; } load(); }, "Show more cars and items");
-        function numberField(key, label, min, max, hint) {
-            fields[key] = el("input", { type: "number", min: String(min), max: String(max), step: "1", inputmode: "numeric", value: String(settings[key]), title: hint });
-            return el("label", { title: hint }, [label, fields[key]]);
-        }
-        var settingsBox = el("details", { class: "settings", title: "Change when an item counts as running low, and how much to order" }, [el("summary", { text: "Settings" }), el("div", { class: "fields" }, [
-            numberField("low_days", "Running low when days left is at most", 1, 365, "An item shows as running low when its estimated days left is this many or fewer (needs about a week of history)."),
-            numberField("low_qty", "Or when quantity is at most", 0, 1000, "An item also shows as running low when the quantity in stock is this number or less."),
-            numberField("order_cover_days", "Order enough to last (days)", 1, 365, "The suggested order quantity covers this many days of sales.")]),
-            el("div", { class: "actions", style: "margin:0 0 12px" }, [el("button", { type: "button", class: "", text: "Save settings", title: "Save these three numbers on the site", onclick: async function () {
-                var body = {};
-                Object.keys(fields).forEach(function (k) { body[k] = parseInt(fields[k].value, 10); });
-                var result = await send("/settings", body);
-                if (result.ok) { say("Settings saved."); load(); } else { say(result.data.error || "Could not save.", true); }
-            } })])]);
+        groups.forEach(function (group) { list.appendChild(bin(s.view, group, settings.low_days)); });
         panel.replaceChildren.apply(panel, [
             note("How to read this page", "Cars are listed with the most urgent first. The bar shows how much time is left before an item runs out. Quantities to order are suggestions from recent sales; change them freely. Nothing is sent to anyone until you copy the order list yourself."),
-            tiles, el("div", { class: "tools" }, toolsChildren), list, more,
-            settingsBox,
+            tiles, el("div", { class: "tools" }, toolsChildren), list,
             el("p", { class: "fineprint", text: "Estimates only. Days left and selling speed come from the stock changes this site has seen since tracking began. They cannot know about seasons, big one-off orders, price changes, or items sold without a stock update. Always check before you order." })].filter(Boolean));
     }
 

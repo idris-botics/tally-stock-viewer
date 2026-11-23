@@ -194,7 +194,7 @@ If a golden changes *on purpose*, run `python tests/check_all.py --update`, **re
 | Ordered | Open orders with age, expected date and an **Overdue** badge; mark received, cancel, change the date, undo the last action. An order is marked **received by itself** when the stock of that item goes up. |
 | Slow stock | In stock but nothing sold for 60 or 90 days. Shown only once history is at least that long. |
 
-**Settings** (top of *Needs restocking*): days-left warning (default 14), low quantity (2), order cover days (30). They are saved on the site. (A hidden "include admin opens" setting also decides whether admin opens count when Training Mode orders cars.)
+**Settings.** The page does not show a settings box for now. It uses the defaults: an item is "running low" when about 14 days or fewer are left (once there are 7 days of history) or 2 or fewer are in stock, and the suggested order covers 30 days of sales. The server still stores and checks these values, so the box can come back.
 
 **Selling speed** is the units that left stock in the last 30 days (restocks never count) divided by the days of history (1 to 30). "Days left" = quantity / speed, always labelled an estimate.
 
