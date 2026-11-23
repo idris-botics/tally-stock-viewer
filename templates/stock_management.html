@@ -516,7 +516,6 @@
         data.open.forEach(function (order) {
             var date = el("input", { type: "date", min: "2020-01-01", value: order.expected_date || "", "aria-label": "Expected date", title: "When you expect this to arrive" });
             var received = stepper(order.qty_ordered, "Quantity received", "How many actually arrived");
-            var ordered = stepper(order.qty_ordered, "Quantity ordered", "How many you ordered. Change it if you ordered a different amount.");
             var act = async function (body, done) {
                 var result = await send("/orders", body);
                 if (result.ok) { say(done); load(); } else { say(result.data.error || "Could not save.", true); }
@@ -528,8 +527,6 @@
                 el("div", { class: "name", text: order.item_name + " × " + order.qty_ordered }),
                 el("div", { class: "chips" }, chips),
                 order.note ? el("div", { class: "meta", text: order.note }) : null,
-                el("div", { class: "actions" }, [el("label", { class: "inline", title: ordered.input.title }, ["Ordered", ordered.box]), el("button", { type: "button", class: "secondary", text: "Save quantity", title: "Save the changed quantity ordered. Undo takes it back.", onclick: function () {
-                    act({ action: "quantity", id: order.id, qty: parseInt(ordered.input.value, 10) }, "Quantity saved."); } })]),
                 el("div", { class: "actions" }, [el("label", { class: "inline", title: received.input.title }, ["Arrived", received.box]), el("button", { type: "button", class: "", text: "Mark received", title: "Record that this arrived, with the quantity shown", onclick: function () {
                     act({ action: "receive", id: order.id, qty_received: parseInt(received.input.value, 10) }, "Marked as received."); } })]),
                 el("div", { class: "actions" }, [date, el("button", { type: "button", class: "secondary", text: "Save date", title: "Save the expected date", onclick: function () {

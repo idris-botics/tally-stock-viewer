@@ -454,28 +454,15 @@ class OrderedTracker(StockMgmtBase):
         self.assertEqual(self.rows("SELECT COUNT(*) FROM restock_orders"), [(0,)])
         self.assertEqual(self.rows("SELECT item_key, qty, note FROM restock_draft"), [("CARA ITEM 001", 5, "dark")])
 
+    def test_the_ordered_quantity_cannot_be_edited(self):
+        order = self.make_order("CARA ITEM 001", 10)
+        self.assertEqual(self.post("/orders", {"action": "quantity", "id": order, "qty": 25}).status_code, 400)
+        self.assertEqual(self.rows("SELECT qty_ordered FROM restock_orders WHERE id = ?", (order,)), [(10,)])
+
     def test_bad_input(self):
         for body in ({"action": "receive"}, {"action": "receive", "id": "x"}, {"action": "receive", "id": 1, "qty_received": -1},
                      {"action": "expected", "id": 1, "expected_date": "nope"}, {"action": "bogus"}):
             self.assertEqual(self.post("/orders", body).status_code, 400, body)
-
-
-    def test_the_quantity_of_an_open_order_can_be_changed_and_undone(self):
-        order = self.make_order("CARA ITEM 001", 10)
-        self.assertEqual(self.post("/orders", {"action": "quantity", "id": order, "qty": 25}).status_code, 200)
-        self.assertEqual(self.rows("SELECT qty_ordered FROM restock_orders WHERE id = ?", (order,)), [(25,)])
-        self.assertEqual(self.get("ordered")["open"][0]["qty_ordered"], 25)
-        self.assertEqual(self.post("/orders", {"action": "undo"}).status_code, 200)
-        self.assertEqual(self.rows("SELECT qty_ordered FROM restock_orders WHERE id = ?", (order,)), [(10,)])
-
-    def test_bad_quantities_and_closed_orders_are_refused(self):
-        order = self.make_order("CARA ITEM 001", 10)
-        for qty in (0, -3, 100001, "7", 2.5, True, None):
-            self.assertEqual(self.post("/orders", {"action": "quantity", "id": order, "qty": qty}).status_code, 400, qty)
-        self.assertEqual(self.post("/orders", {"action": "quantity", "id": 99999, "qty": 5}).status_code, 404)
-        self.post("/orders", {"action": "receive", "id": order})
-        self.assertEqual(self.post("/orders", {"action": "quantity", "id": order, "qty": 5}).status_code, 409)
-        self.assertEqual(self.rows("SELECT qty_ordered FROM restock_orders WHERE id = ?", (order,)), [(10,)])
 
 
 class SlowStock(StockMgmtBase):
@@ -648,12 +635,12 @@ class ExcelExport(StockMgmtBase):
         OrderedTracker.make_order(self, "CARA ITEM 002", 4, "2026-03-18T05:00:00", "2026-04-02")
         done = OrderedTracker.make_order(self, "CARB ITEM 001", 6, "2026-03-01T05:00:00")
         self.sql("UPDATE restock_orders SET status='received', received_at_utc='2026-03-18T05:00:00', qty_received=5 WHERE id=?", (done,))
-        self.post("/orders", {"action": "quantity", "id": overdue, "qty": 12})
+        self.sql("UPDATE restock_orders SET qty_ordered = 12 WHERE id = ?", (overdue,))
         response, book = self.workbook("ordered")
         self.assertIn("orders-2026-03-20.xlsx", response.headers["Content-Disposition"])
         self.assertEqual(book.sheetnames, ["Open orders", "Received (30 days)"])
         rows = [[c.value for c in row] for row in book["Open orders"].iter_rows(min_row=4, max_row=5)]
-        self.assertEqual(rows[0][:6], ["CARA ITEM 001", 12, "2026-03-10", "2026-03-15", 10, "Yes"])       # the changed quantity, overdue first
+        self.assertEqual(rows[0][:6], ["CARA ITEM 001", 12, "2026-03-10", "2026-03-15", 10, "Yes"])       # overdue first
         self.assertEqual(rows[1][:6], ["CARA ITEM 002", 4, "2026-03-18", "2026-04-02", 2, None])
         self.assertEqual([c.value for c in book["Received (30 days)"][2]], ["CARB ITEM 001", 6, 5, "2026-03-18"])
 

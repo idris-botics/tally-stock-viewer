@@ -7257,8 +7257,6 @@ def _stock_undo(conn):
         conn.execute("UPDATE restock_orders SET status = 'ordered', received_at_utc = NULL, qty_received = NULL WHERE id = ?", (action["id"],))
     elif kind == "expected":
         conn.execute("UPDATE restock_orders SET expected_date = ? WHERE id = ?", (action.get("prev"), action["id"]))
-    elif kind == "quantity":
-        conn.execute("UPDATE restock_orders SET qty_ordered = ? WHERE id = ?", (action.get("prev"), action["id"]))
     _stock_set_last_action(conn, None)
     return {"undone": kind}
 
@@ -7270,10 +7268,10 @@ def stock_mgmt_orders():
     try:
         body = _stock_mgmt_json_body()
         action = body.get("action")
-        if action not in ("place", "receive", "cancel", "expected", "quantity", "undo"):
+        if action not in ("place", "receive", "cancel", "expected", "undo"):
             raise _StockMgmtError("Unknown action")
-        order_id = qty_received = expected = new_qty = None
-        if action in ("receive", "cancel", "expected", "quantity"):
+        order_id = qty_received = expected = None
+        if action in ("receive", "cancel", "expected"):
             order_id = _stock_whole(body.get("id"), 1, 2 ** 31)
             if order_id is None:
                 raise _StockMgmtError("Order number is missing")
@@ -7283,10 +7281,6 @@ def stock_mgmt_orders():
                 raise _StockMgmtError(f"Quantity must be a whole number from 1 to {STOCK_MGMT_MAX_QTY}")
         if action == "expected":
             expected = _stock_date_text(body.get("expected_date"), allow_empty=True)
-        if action == "quantity":
-            new_qty = _stock_whole(body.get("qty"), 1, STOCK_MGMT_MAX_QTY)
-            if new_qty is None:
-                raise _StockMgmtError(f"Quantity must be a whole number from 1 to {STOCK_MGMT_MAX_QTY}")
         with _STOCK_MGMT_WRITE_LOCK, db.get_connection() as conn:
             if action == "place":
                 result = _stock_place_orders(conn, body)
@@ -7303,9 +7297,6 @@ def stock_mgmt_orders():
                 elif action == "cancel":
                     conn.execute("UPDATE restock_orders SET status = 'cancelled' WHERE id = ?", (order_id,))
                     _stock_set_last_action(conn, {"type": "cancel", "id": order_id})
-                elif action == "quantity":
-                    conn.execute("UPDATE restock_orders SET qty_ordered = ? WHERE id = ?", (new_qty, order_id))
-                    _stock_set_last_action(conn, {"type": "quantity", "id": order_id, "prev": qty_ordered})
                 else:
                     conn.execute("UPDATE restock_orders SET expected_date = ? WHERE id = ?", (expected, order_id))
                     _stock_set_last_action(conn, {"type": "expected", "id": order_id, "prev": previous_expected})
