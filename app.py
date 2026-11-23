@@ -7000,6 +7000,101 @@ def stock_mgmt_data():
         return _stock_mgmt_failure(exc)
 
 
+def _xl_set(ws, row, column, value, bold=False, number=False):
+    """One cell. Text is always stored as text (an item name that starts with '=' must never become a formula)."""
+    from openpyxl.styles import Alignment, Font
+    cell = ws.cell(row=row, column=column, value=value)
+    if isinstance(value, str):
+        cell.data_type = "s"
+    if bold:
+        cell.font = Font(bold=True)
+    if number:
+        cell.alignment = Alignment(horizontal="right")
+    return cell
+
+
+def _xl_header(ws, row, titles, widths):
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+    for column, (title, width) in enumerate(zip(titles, widths), start=1):
+        cell = ws.cell(row=row, column=column, value=title)
+        cell.font = Font(bold=True, color="132238")
+        cell.fill = PatternFill("solid", fgColor="E8EEF7")
+        cell.alignment = Alignment(vertical="center")
+        ws.column_dimensions[get_column_letter(column)].width = width
+    ws.freeze_panes = ws.cell(row=row + 1, column=1)
+
+
+def _stock_export_workbook(conn, what):
+    """The order list (what='order') or the placed orders (what='ordered') as an Excel workbook, with the same
+    quantities the page shows. Returns (workbook, file stem)."""
+    import openpyxl
+    today = _today_ist_date()
+    stamp = f"{today.day} {_MONTHS[today.month - 1]} {today.year}"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    if what == "order":
+        data = _stock_tab_order(conn)
+        ws.title = "Order list"
+        _xl_set(ws, 1, 1, f"Order list - {stamp}", bold=True)
+        _xl_header(ws, 3, ("Category", "Item", "Quantity", "Note"), (24, 56, 12, 40))
+        row = 4
+        for group in data["groups"]:
+            for item in group["items"]:
+                _xl_set(ws, row, 1, group["name"])
+                _xl_set(ws, row, 2, item["item_name"])
+                _xl_set(ws, row, 3, item["qty"], number=True)
+                _xl_set(ws, row, 4, item["note"] or "")
+                row += 1
+        _xl_set(ws, row + 1, 2, f"{data['total_items']} items", bold=True)
+        return wb, "order-list-" + today.isoformat()
+    ws.title = "Open orders"
+    _xl_set(ws, 1, 1, f"Open orders - {stamp}", bold=True)
+    _xl_header(ws, 3, ("Item", "Quantity ordered", "Ordered on", "Expected", "Days since ordering", "Overdue", "Note"), (56, 17, 14, 14, 20, 10, 40))
+    row, page = 4, 1
+    while True:
+        data = _stock_tab_ordered(conn, page)
+        for order in data["open"]:
+            _xl_set(ws, row, 1, order["item_name"])
+            _xl_set(ws, row, 2, order["qty_ordered"], number=True)
+            _xl_set(ws, row, 3, order["ordered_on"])
+            _xl_set(ws, row, 4, order["expected_date"] or "")
+            _xl_set(ws, row, 5, order["age_days"], number=True)
+            _xl_set(ws, row, 6, "Yes" if order["overdue"] else "")
+            _xl_set(ws, row, 7, order["note"] or "")
+            row += 1
+        if not data["more"] or page >= 100:
+            break
+        page += 1
+    received = wb.create_sheet("Received (30 days)")
+    _xl_header(received, 1, ("Item", "Quantity ordered", "Quantity received", "Received on"), (56, 17, 18, 14))
+    for index, order in enumerate(data["recent"], start=2):
+        _xl_set(received, index, 1, order["item_name"])
+        _xl_set(received, index, 2, order["qty_ordered"], number=True)
+        _xl_set(received, index, 3, order["qty_received"], number=True)
+        _xl_set(received, index, 4, order["received_on"] or "")
+    return wb, "orders-" + today.isoformat()
+
+
+@app.route("/admin/stock_mgmt/export")
+@admin_required
+def stock_mgmt_export():
+    """Excel download of the order list (?what=order, the default) or of the placed orders (?what=ordered)."""
+    try:
+        what = request.args.get("what", "order")
+        if what not in ("order", "ordered"):
+            raise _StockMgmtError("Unknown export")
+        with db.get_connection() as conn:
+            workbook, stem = _stock_export_workbook(conn, what)
+        buffer = BytesIO()
+        workbook.save(buffer)
+        buffer.seek(0)
+        return send_file(buffer, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                         as_attachment=True, download_name=stem + ".xlsx")
+    except Exception as exc:
+        return _stock_mgmt_failure(exc)
+
+
 @app.route("/admin/stock_mgmt/settings", methods=["POST"])
 @admin_required
 def stock_mgmt_settings_save():
@@ -7162,6 +7257,8 @@ def _stock_undo(conn):
         conn.execute("UPDATE restock_orders SET status = 'ordered', received_at_utc = NULL, qty_received = NULL WHERE id = ?", (action["id"],))
     elif kind == "expected":
         conn.execute("UPDATE restock_orders SET expected_date = ? WHERE id = ?", (action.get("prev"), action["id"]))
+    elif kind == "quantity":
+        conn.execute("UPDATE restock_orders SET qty_ordered = ? WHERE id = ?", (action.get("prev"), action["id"]))
     _stock_set_last_action(conn, None)
     return {"undone": kind}
 
@@ -7173,10 +7270,10 @@ def stock_mgmt_orders():
     try:
         body = _stock_mgmt_json_body()
         action = body.get("action")
-        if action not in ("place", "receive", "cancel", "expected", "undo"):
+        if action not in ("place", "receive", "cancel", "expected", "quantity", "undo"):
             raise _StockMgmtError("Unknown action")
-        order_id = qty_received = expected = None
-        if action in ("receive", "cancel", "expected"):
+        order_id = qty_received = expected = new_qty = None
+        if action in ("receive", "cancel", "expected", "quantity"):
             order_id = _stock_whole(body.get("id"), 1, 2 ** 31)
             if order_id is None:
                 raise _StockMgmtError("Order number is missing")
@@ -7186,6 +7283,10 @@ def stock_mgmt_orders():
                 raise _StockMgmtError(f"Quantity must be a whole number from 1 to {STOCK_MGMT_MAX_QTY}")
         if action == "expected":
             expected = _stock_date_text(body.get("expected_date"), allow_empty=True)
+        if action == "quantity":
+            new_qty = _stock_whole(body.get("qty"), 1, STOCK_MGMT_MAX_QTY)
+            if new_qty is None:
+                raise _StockMgmtError(f"Quantity must be a whole number from 1 to {STOCK_MGMT_MAX_QTY}")
         with _STOCK_MGMT_WRITE_LOCK, db.get_connection() as conn:
             if action == "place":
                 result = _stock_place_orders(conn, body)
@@ -7202,6 +7303,9 @@ def stock_mgmt_orders():
                 elif action == "cancel":
                     conn.execute("UPDATE restock_orders SET status = 'cancelled' WHERE id = ?", (order_id,))
                     _stock_set_last_action(conn, {"type": "cancel", "id": order_id})
+                elif action == "quantity":
+                    conn.execute("UPDATE restock_orders SET qty_ordered = ? WHERE id = ?", (new_qty, order_id))
+                    _stock_set_last_action(conn, {"type": "quantity", "id": order_id, "prev": qty_ordered})
                 else:
                     conn.execute("UPDATE restock_orders SET expected_date = ? WHERE id = ?", (expected, order_id))
                     _stock_set_last_action(conn, {"type": "expected", "id": order_id, "prev": previous_expected})

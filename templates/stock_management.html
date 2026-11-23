@@ -347,6 +347,17 @@
         var lowFirst = await getData({ tab: "needs", section: "low", q: s.q });
         var outFirst = await getData({ tab: "needs", section: "out", q: s.q, show_all: s.showAll ? 1 : 0 });
         orderCount = (await getData({ tab: "order" })).total_items;
+        // A search goes to the list that has results: typing "baleno" while on Running low jumps to Sold out when that is
+        // where the matches are. Tapping a card never moves you, it only explains where the matches are.
+        var switchedFor = "";
+        if (s.pickView) {
+            s.pickView = false;
+            if (s.q) {
+                var here = s.view === "low" ? lowFirst.total : outFirst.total;
+                var there = s.view === "low" ? outFirst.total : lowFirst.total;
+                if (here === 0 && there > 0) { s.view = s.view === "low" ? "out" : "low"; switchedFor = s.q; }
+            }
+        }
         var data = s.view === "low" ? (s.lowPages > 1 ? await pagesOf({ tab: "needs", section: "low", q: s.q }, s.lowPages) : lowFirst)
                                     : (s.outPages > 1 ? await pagesOf({ tab: "needs", section: "out", q: s.q, show_all: s.showAll ? 1 : 0 }, s.outPages) : outFirst);
         setBanner(lowFirst.tracking);
@@ -361,7 +372,7 @@
             tile("low", lowFirst.total, "Running low", "Items still in stock but close to running out. Tap to show them.", lowFirst.total ? "soon" : ""),
             tile("out", outFirst.total, "Sold out", "Items at zero that sold before or belong to a car dealers opened. Tap to show them.", outFirst.total ? "urgent" : ""),
             tile("order", orderCount, "On order list", "Items you have already picked to order. Tap to open the order list.", "")]);
-        var search = searchBox(s.q, function (value) { s.q = value; s.lowPages = 1; s.outPages = 1; load(); }, "Search an item or car", "Type part of an item name, then press Search");
+        var search = searchBox(s.q, function (value) { s.q = value; s.lowPages = 1; s.outPages = 1; s.pickView = true; load(); }, "Search an item or car", "Type part of an item name or car, then press Search. If nothing matches here, it jumps to the list that has matches.");
         var toolsChildren = [search];
         if (s.view === "out") {
             var toggle = el("input", { type: "checkbox", title: "Off: only items that sold before or belong to cars dealers opened. On: every catalogue item that is at zero." });
@@ -373,9 +384,16 @@
         toolsChildren.push(el("button", { type: "button", class: "secondary", text: "Open all", title: "Open every car", onclick: function () { ui.allOpen = true; load(); } }),
                            el("button", { type: "button", class: "secondary", text: "Close all", title: "Close every car", onclick: function () { ui.allOpen = false; load(); } }));
         var list = el("div", {});
+        if (switchedFor) {
+            list.appendChild(el("div", { class: "notice info", style: "display:block;position:static" }, ["Nothing " + (s.view === "out" ? "running low" : "sold out") + " matches \u201c" + switchedFor + "\u201d, so this shows the " + (s.view === "out" ? "sold-out" : "running-low") + " items that do."]));
+        }
         if (!groups.length) {
-            list.appendChild(s.view === "low" ? emptyState(s.q ? "No match" : "Nothing is running low", s.q ? "Try a shorter search." : "Every item has enough stock for now.")
-                                              : emptyState(s.showAll || s.q ? "No items found" : "Nothing sold out needs attention", s.showAll || s.q ? "Try a different search or turn on the whole catalogue." : "Sold-out items appear here once they have sold before."));
+            var otherTotal = s.view === "low" ? outFirst.total : lowFirst.total;
+            var otherName = s.view === "low" ? "Sold out" : "Running low";
+            var hint = s.q && otherTotal > 0 ? otherTotal + " item" + (otherTotal === 1 ? "" : "s") + " match in \u201c" + otherName + "\u201d. Tap that card above to see them."
+                                              : "Try a shorter search.";
+            list.appendChild(s.view === "low" ? emptyState(s.q ? "No match in Running low" : "Nothing is running low", s.q ? hint : "Every item has enough stock for now.")
+                                              : emptyState(s.showAll || s.q ? "No match in Sold out" : "Nothing sold out needs attention", s.q ? hint : (s.showAll ? "Try a different search." : "Sold-out items appear here once they have sold before.")));
         }
         groups.forEach(function (group, i) { list.appendChild(bin(s.view, group, settings.low_days, groups.length <= 3 || i === 0)); });
         var more = moreButton(data, function () { if (s.view === "low") { s.lowPages += 1; } else { s.outPages += 1; } load(); }, "Show more cars and items");
@@ -444,6 +462,7 @@
             el("div", { class: "grow" }, [el("strong", { text: data.total_items + (data.total_items === 1 ? " item" : " items") + " to order" })]),
             el("button", { type: "button", class: "secondary", text: "Copy as text", disabled: !data.total_items, title: "Copy the whole list as plain text, ready to paste into WhatsApp", onclick: function () { copyText(data.text); } }),
             el("button", { type: "button", class: "secondary", text: "Print", disabled: !data.total_items, title: "Print the list on one clean page", onclick: function () { window.print(); } }),
+            el("button", { type: "button", class: "secondary", text: "Download Excel", disabled: !data.total_items, title: "Download this order list as an Excel file, with the quantities and notes shown here", onclick: function () { window.location.href = BASE + "/export?what=order"; } }),
             el("button", { type: "button", class: "secondary", text: "Undo", disabled: !data.can_undo, title: "Undo your last order action (placing, receiving, cancelling or changing a date)", onclick: undo })]));
         if (!data.total_items) {
             parts.push(emptyState("Your order list is empty", "Add items from the Restock tab."));
@@ -491,11 +510,13 @@
         setBanner(data.tracking);
         var parts = [note("About orders", "This is a reminder list, not accounting. When the stock of an ordered item goes up, its order is marked received by itself, using the actual increase. Change the expected date or cancel an order any time; Undo takes back your last action."),
             el("div", { class: "bar" }, [el("div", { class: "grow" }, [el("strong", { text: data.total + (data.total === 1 ? " open order" : " open orders") })]),
+                el("button", { type: "button", class: "secondary", text: "Download Excel", disabled: !data.total && !data.recent.length, title: "Download the open orders and the orders received in the last 30 days as an Excel file", onclick: function () { window.location.href = BASE + "/export?what=ordered"; } }),
                 el("button", { type: "button", class: "secondary", text: "Undo", disabled: !data.can_undo, title: "Undo your last order action", onclick: undo })])];
         if (!data.open.length) { parts.push(emptyState("No open orders", "Orders you mark as ordered will appear here.")); }
         data.open.forEach(function (order) {
             var date = el("input", { type: "date", min: "2020-01-01", value: order.expected_date || "", "aria-label": "Expected date", title: "When you expect this to arrive" });
             var received = stepper(order.qty_ordered, "Quantity received", "How many actually arrived");
+            var ordered = stepper(order.qty_ordered, "Quantity ordered", "How many you ordered. Change it if you ordered a different amount.");
             var act = async function (body, done) {
                 var result = await send("/orders", body);
                 if (result.ok) { say(done); load(); } else { say(result.data.error || "Could not save.", true); }
@@ -507,7 +528,9 @@
                 el("div", { class: "name", text: order.item_name + " × " + order.qty_ordered }),
                 el("div", { class: "chips" }, chips),
                 order.note ? el("div", { class: "meta", text: order.note }) : null,
-                el("div", { class: "actions" }, [received.box, el("button", { type: "button", class: "", text: "Mark received", title: "Record that this arrived, with the quantity shown", onclick: function () {
+                el("div", { class: "actions" }, [el("label", { class: "inline", title: ordered.input.title }, ["Ordered", ordered.box]), el("button", { type: "button", class: "secondary", text: "Save quantity", title: "Save the changed quantity ordered. Undo takes it back.", onclick: function () {
+                    act({ action: "quantity", id: order.id, qty: parseInt(ordered.input.value, 10) }, "Quantity saved."); } })]),
+                el("div", { class: "actions" }, [el("label", { class: "inline", title: received.input.title }, ["Arrived", received.box]), el("button", { type: "button", class: "", text: "Mark received", title: "Record that this arrived, with the quantity shown", onclick: function () {
                     act({ action: "receive", id: order.id, qty_received: parseInt(received.input.value, 10) }, "Marked as received."); } })]),
                 el("div", { class: "actions" }, [date, el("button", { type: "button", class: "secondary", text: "Save date", title: "Save the expected date", onclick: function () {
                     act({ action: "expected", id: order.id, expected_date: date.value || null }, "Date saved."); } }),

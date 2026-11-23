@@ -192,6 +192,21 @@ class PhoneUi(unittest.TestCase):
         self.assertEqual(untitled, [], "every button needs hover text")
         self.assertIn("Estimates only", page.locator("#panel").inner_text())            # the disclaimer is on the page
 
+    def test_a_search_jumps_to_the_list_that_has_the_matches(self):
+        """Typing a car that only has sold-out items while on Running low must not show an empty list."""
+        page = self.open("phone-390", "needs")
+        self.assertEqual(page.locator(".tile[aria-pressed=true]").inner_text().split(chr(10))[-1], "Running low")
+        page.fill("input[aria-label=Search]", "ALTO K10 (2014-2019) LONG NAME FOR WRAPPING 3D")
+        page.press("input[aria-label=Search]", "Enter")
+        page.wait_for_function("(document.querySelector('.tile[aria-pressed=true]') || {textContent: ''}).textContent.includes('Sold out')")
+        self.assertIn("Sold out", page.locator(".tile[aria-pressed=true]").inner_text())
+        self.assertIn("running low", page.locator("#panel .notice.info").inner_text())
+        self.assertIn("3D MAT", page.locator("#panel details.bin").first.inner_text())
+        # tapping the other card shows where the matches are instead of an unexplained empty list
+        page.locator(".tile", has_text="Running low").click()
+        page.wait_for_selector("#panel .empty")
+        self.assertIn("match in “Sold out”", page.locator("#panel .empty").inner_text())
+
     def test_the_tab_counts_show(self):
         page = self.open("phone-390", "needs")
         page.wait_for_function("document.querySelector('[data-count=order]').textContent === '3'")

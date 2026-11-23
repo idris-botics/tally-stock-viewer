@@ -56,9 +56,9 @@
   "type": "application/json"
  },
  "admin_locked GET /admin/stock_mgmt": {
-  "body": "f0239519e5",
+  "body": "5c66eb3ee4",
   "cache": "",
-  "len": 42235,
+  "len": 44635,
   "location": "",
   "status": 200,
   "type": "text/html"
@@ -70,6 +70,14 @@
   "location": "",
   "status": 400,
   "type": "application/json"
+ },
+ "admin_locked GET /admin/stock_mgmt/export": {
+  "body": "e0998bdb80",
+  "cache": "no-cache",
+  "len": 8,
+  "location": "",
+  "status": 200,
+  "type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
  },
  "admin_locked GET /admin/system": {
   "body": "d38e186243",
@@ -952,9 +960,9 @@
   "type": "application/json"
  },
  "admin_unlocked GET /admin/stock_mgmt": {
-  "body": "f0239519e5",
+  "body": "5c66eb3ee4",
   "cache": "",
-  "len": 42235,
+  "len": 44635,
   "location": "",
   "status": 200,
   "type": "text/html"
@@ -966,6 +974,14 @@
   "location": "",
   "status": 400,
   "type": "application/json"
+ },
+ "admin_unlocked GET /admin/stock_mgmt/export": {
+  "body": "e0998bdb80",
+  "cache": "no-cache",
+  "len": 8,
+  "location": "",
+  "status": 200,
+  "type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
  },
  "admin_unlocked GET /admin/system": {
   "body": "2cb520b3a7",
@@ -1863,6 +1879,14 @@
   "status": 401,
   "type": "text/html"
  },
+ "anonymous GET /admin/stock_mgmt/export": {
+  "body": "5cba276706",
+  "cache": "",
+  "len": 6144,
+  "location": "",
+  "status": 401,
+  "type": "text/html"
+ },
  "anonymous GET /admin/system": {
   "body": "f9a71c5971",
   "cache": "",
@@ -2752,6 +2776,14 @@
   "type": "application/json"
  },
  "dealer GET /admin/stock_mgmt/data": {
+  "body": "9d21e23c8b",
+  "cache": "no-store",
+  "len": 34,
+  "location": "",
+  "status": 403,
+  "type": "application/json"
+ },
+ "dealer GET /admin/stock_mgmt/export": {
   "body": "9d21e23c8b",
   "cache": "no-store",
   "len": 34,

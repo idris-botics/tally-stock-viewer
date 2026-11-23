@@ -460,6 +460,24 @@ class OrderedTracker(StockMgmtBase):
             self.assertEqual(self.post("/orders", body).status_code, 400, body)
 
 
+    def test_the_quantity_of_an_open_order_can_be_changed_and_undone(self):
+        order = self.make_order("CARA ITEM 001", 10)
+        self.assertEqual(self.post("/orders", {"action": "quantity", "id": order, "qty": 25}).status_code, 200)
+        self.assertEqual(self.rows("SELECT qty_ordered FROM restock_orders WHERE id = ?", (order,)), [(25,)])
+        self.assertEqual(self.get("ordered")["open"][0]["qty_ordered"], 25)
+        self.assertEqual(self.post("/orders", {"action": "undo"}).status_code, 200)
+        self.assertEqual(self.rows("SELECT qty_ordered FROM restock_orders WHERE id = ?", (order,)), [(10,)])
+
+    def test_bad_quantities_and_closed_orders_are_refused(self):
+        order = self.make_order("CARA ITEM 001", 10)
+        for qty in (0, -3, 100001, "7", 2.5, True, None):
+            self.assertEqual(self.post("/orders", {"action": "quantity", "id": order, "qty": qty}).status_code, 400, qty)
+        self.assertEqual(self.post("/orders", {"action": "quantity", "id": 99999, "qty": 5}).status_code, 404)
+        self.post("/orders", {"action": "receive", "id": order})
+        self.assertEqual(self.post("/orders", {"action": "quantity", "id": order, "qty": 5}).status_code, 409)
+        self.assertEqual(self.rows("SELECT qty_ordered FROM restock_orders WHERE id = ?", (order,)), [(10,)])
+
+
 class SlowStock(StockMgmtBase):
     def test_short_history_shows_a_message_not_a_list(self):
         self.tracking_since(20)
@@ -584,6 +602,65 @@ class AskedFor(StockMgmtBase):
         text = json.dumps([cars, misses]).lower()
         for forbidden in ('"star"', "jeewajee", "username", "user_id"):
             self.assertNotIn(forbidden, text)
+
+
+
+class ExcelExport(StockMgmtBase):
+    XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    def workbook(self, what, client=None):
+        import io
+        import openpyxl
+        response = (client or self.admin).get(BASE + "/export", query_string={"what": what})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, self.XLSX)
+        return response, openpyxl.load_workbook(io.BytesIO(response.get_data()))
+
+    def test_the_order_list_downloads_as_excel_with_the_quantities_and_notes(self):
+        category = self.db.get_all_categories()[0]["name"]
+        self.db.upsert_design_category("CARA ITEM 001", category, 1)
+        self.post("/draft", {"action": "add", "item_name": "CARA ITEM 001", "qty": 5, "note": "dark"})
+        self.post("/draft", {"action": "add", "item_name": "CARB ITEM 002", "qty": 3})
+        self.post("/draft", {"action": "update", "item_key": "CARB ITEM 002", "qty": 8})          # the file shows the changed quantity
+        response, book = self.workbook("order")
+        self.assertIn("order-list-2026-03-20.xlsx", response.headers["Content-Disposition"])
+        sheet = book["Order list"]
+        self.assertEqual(sheet["A1"].value, "Order list - 20 Mar 2026")
+        self.assertEqual([c.value for c in sheet[3]], ["Category", "Item", "Quantity", "Note"])
+        self.assertEqual([[c.value for c in row] for row in sheet.iter_rows(min_row=4, max_row=5)],
+                         [[category, "CARA ITEM 001", 5, "dark"], ["No category yet", "CARB ITEM 002", 8, None]])       # an empty note is an empty cell
+        self.assertIsInstance(sheet["C4"].value, int)
+        self.assertEqual(sheet["B7"].value, "2 items")
+
+    def test_an_empty_order_list_still_downloads(self):
+        _response, book = self.workbook("order")
+        self.assertEqual(book["Order list"]["B5"].value, "0 items")
+
+    def test_an_item_name_starting_with_an_equals_sign_is_text_never_a_formula(self):
+        self.sql("INSERT INTO stock_state (item_key, item_name, qty, updated_at_utc) VALUES ('=1+1', '=1+1', 1, 'x')")
+        self.assertEqual(self.post("/draft", {"action": "add", "item_name": "=1+1", "qty": 2}).status_code, 200)
+        _response, book = self.workbook("order")
+        cell = book["Order list"]["B4"]
+        self.assertEqual((cell.value, cell.data_type), ("=1+1", "s"))
+
+    def test_open_and_received_orders_download_as_excel(self):
+        overdue = OrderedTracker.make_order(self, "CARA ITEM 001", 10, "2026-03-10T05:00:00", "2026-03-15")
+        OrderedTracker.make_order(self, "CARA ITEM 002", 4, "2026-03-18T05:00:00", "2026-04-02")
+        done = OrderedTracker.make_order(self, "CARB ITEM 001", 6, "2026-03-01T05:00:00")
+        self.sql("UPDATE restock_orders SET status='received', received_at_utc='2026-03-18T05:00:00', qty_received=5 WHERE id=?", (done,))
+        self.post("/orders", {"action": "quantity", "id": overdue, "qty": 12})
+        response, book = self.workbook("ordered")
+        self.assertIn("orders-2026-03-20.xlsx", response.headers["Content-Disposition"])
+        self.assertEqual(book.sheetnames, ["Open orders", "Received (30 days)"])
+        rows = [[c.value for c in row] for row in book["Open orders"].iter_rows(min_row=4, max_row=5)]
+        self.assertEqual(rows[0][:6], ["CARA ITEM 001", 12, "2026-03-10", "2026-03-15", 10, "Yes"])       # the changed quantity, overdue first
+        self.assertEqual(rows[1][:6], ["CARA ITEM 002", 4, "2026-03-18", "2026-04-02", 2, None])
+        self.assertEqual([c.value for c in book["Received (30 days)"][2]], ["CARB ITEM 001", 6, 5, "2026-03-18"])
+
+    def test_unknown_export_is_refused_and_dealers_are_denied(self):
+        self.assertEqual(self.admin.get(BASE + "/export", query_string={"what": "everything"}).status_code, 400)
+        self.assertEqual(self.dealer.get(BASE + "/export").status_code, 403)
+        self.assertIn(self.anon.get(BASE + "/export").status_code, (401, 403))
 
 
 class AdminOnly(StockMgmtBase):
