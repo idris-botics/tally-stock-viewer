@@ -76,7 +76,10 @@
         .tile.soon b { color: #b45309; }
         .tools { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
         .search { display: flex; gap: 8px; flex: 1 1 240px; min-width: 0; }
-        .search input { flex: 1 1 auto; min-width: 0; }
+        .search .field { position: relative; flex: 1 1 auto; min-width: 0; }
+        .search .field input { width: 100%; padding-right: 48px; }
+        .search .clear { position: absolute; right: 2px; top: 0; width: 44px; height: 44px; padding: 0; border: 0; background: transparent; color: var(--muted); font-size: 24px; line-height: 1; }
+        .search .clear:hover { color: var(--text); }
 
         /* one car's items: a header row, then one row per item like the accounts table */
         .bin { border: 1px solid var(--border); border-radius: 12px; background: #fff; margin-bottom: 10px; overflow: hidden; }
@@ -166,7 +169,7 @@
     var BASE = "/admin/stock_mgmt";
     var tabNames = ["needs", "order", "ordered", "slow"];
     var current = "needs";
-    var ui = { needs: { view: "low", showAll: false, q: "", lowPages: 1, outPages: 1 }, slow: { days: 60, q: "", page: 1 }, ordered: { page: 1 }, open: {}, allOpen: null };
+    var ui = { needs: { view: "low", showAll: false, q: "", lowPages: 1, outPages: 1 }, slow: { days: 60, q: "", page: 1 }, ordered: { page: 1 }, open: {} };
     var panel = document.getElementById("panel");
     var banner = document.getElementById("banner");
     var toast = document.getElementById("msg");
@@ -242,8 +245,17 @@
     }
     function searchBox(value, onSearch, placeholder, hint) {
         var input = el("input", { type: "text", value: value, placeholder: placeholder || "Search by name", maxlength: "80", "aria-label": "Search", enterkeyhint: "search", title: hint || "Type part of a name, then press Search" });
+        var clear = el("button", { type: "button", class: "clear", text: "\u00d7", title: "Clear the search and show everything again", "aria-label": "Clear search" });
+        clear.style.display = value ? "" : "none";
+        clear.addEventListener("click", function () {
+            input.value = "";
+            clear.style.display = "none";
+            if (value) { onSearch(""); } else { input.focus(); }
+        });
+        input.addEventListener("input", function () { clear.style.display = input.value ? "" : "none"; });
         input.addEventListener("keydown", function (event) { if (event.key === "Enter") { onSearch(input.value.trim()); } });
-        return el("div", { class: "search" }, [input, el("button", { type: "button", class: "secondary", text: "Search", title: "Search the list", onclick: function () { onSearch(input.value.trim()); } })]);
+        return el("div", { class: "search" }, [el("div", { class: "field" }, [input, clear]),
+            el("button", { type: "button", class: "secondary", text: "Search", title: "Search the list", onclick: function () { onSearch(input.value.trim()); } })]);
     }
     function stepper(initial, label, hint) {
         var input = el("input", { type: "number", min: "1", max: "100000", step: "1", inputmode: "numeric", value: String(initial), "aria-label": label || "Quantity", title: hint || "How many to order" });
@@ -318,7 +330,7 @@
     }
     function bin(view, group, lowDays, startOpen) {
         var id = view + "|" + group.car;
-        var isOpen = ui.allOpen !== null ? ui.allOpen : (id in ui.open ? ui.open[id] : startOpen);
+        var isOpen = id in ui.open ? ui.open[id] : startOpen;
         var urgentCount = group.rows.filter(function (r) { return view === "out" || (r.days_left !== null && r.days_left <= 3) || r.qty <= 1; }).length;
         var soonest = null;
         group.rows.forEach(function (r) { if (r.days_left !== null && (soonest === null || r.days_left < soonest)) { soonest = r.days_left; } });
@@ -366,7 +378,7 @@
         var tile = function (key, big, label, hint, kind) {
             return el("button", { type: "button", class: "tile " + (kind || ""), "aria-pressed": s.view === key ? "true" : "false", title: hint, onclick: function () {
                 if (key === "order") { select("order"); return; }
-                s.view = key; ui.allOpen = null; load(); } }, [el("b", { text: String(big) }), el("span", { text: label })]);
+                s.view = key; load(); } }, [el("b", { text: String(big) }), el("span", { text: label })]);
         };
         var tiles = el("div", { class: "tiles" }, [
             tile("low", lowFirst.total, "Running low", "Items still in stock but close to running out. Tap to show them.", lowFirst.total ? "soon" : ""),
@@ -374,15 +386,7 @@
             tile("order", orderCount, "On order list", "Items you have already picked to order. Tap to open the order list.", "")]);
         var search = searchBox(s.q, function (value) { s.q = value; s.lowPages = 1; s.outPages = 1; s.pickView = true; load(); }, "Search an item or car", "Type part of an item name or car, then press Search. If nothing matches here, it jumps to the list that has matches.");
         var toolsChildren = [search];
-        if (s.view === "out") {
-            var toggle = el("input", { type: "checkbox", title: "Off: only items that sold before or belong to cars dealers opened. On: every catalogue item that is at zero." });
-            toggle.checked = s.showAll;
-            toggle.addEventListener("change", function () { s.showAll = toggle.checked; s.outPages = 1; load(); });
-            toolsChildren.push(el("label", { class: "inline", title: toggle.title }, [toggle, "Whole catalogue"]));
-        }
         var groups = groupsOf(data.rows);
-        toolsChildren.push(el("button", { type: "button", class: "secondary", text: "Open all", title: "Open every car", onclick: function () { ui.allOpen = true; load(); } }),
-                           el("button", { type: "button", class: "secondary", text: "Close all", title: "Close every car", onclick: function () { ui.allOpen = false; load(); } }));
         var list = el("div", {});
         if (switchedFor) {
             list.appendChild(el("div", { class: "notice info", style: "display:block;position:static" }, ["Nothing " + (s.view === "out" ? "running low" : "sold out") + " matches \u201c" + switchedFor + "\u201d, so this shows the " + (s.view === "out" ? "sold-out" : "running-low") + " items that do."]));

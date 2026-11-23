@@ -207,6 +207,22 @@ class PhoneUi(unittest.TestCase):
         page.wait_for_selector("#panel .empty")
         self.assertIn("match in “Sold out”", page.locator("#panel .empty").inner_text())
 
+    def test_the_search_has_a_clear_button_and_the_old_extras_are_gone(self):
+        page = self.open("phone-390", "needs")
+        text = page.locator("#panel").inner_text()
+        for gone in ("Open all", "Close all", "Whole catalogue"):
+            self.assertNotIn(gone, text)
+        self.assertFalse(page.locator("button[aria-label='Clear search']").is_visible())      # nothing typed yet
+        page.fill("input[aria-label=Search]", "ALTO K10 (2014-2019) LONG NAME FOR WRAPPING 3D")
+        self.assertTrue(page.locator("button[aria-label='Clear search']").is_visible())
+        page.press("input[aria-label=Search]", "Enter")
+        page.wait_for_function("(document.querySelector('.tile[aria-pressed=true]') || {textContent: ''}).textContent.includes('Sold out')")
+        page.locator("button[aria-label='Clear search']").click()
+        page.wait_for_function("document.querySelector('input[aria-label=Search]').value === '' && document.querySelectorAll('#panel details.bin').length >= 2")
+        self.assertFalse(page.locator("button[aria-label='Clear search']").is_visible())
+        box = page.locator(".search .field input").bounding_box()
+        self.assertGreaterEqual(box["height"], 44)
+
     def test_the_tab_counts_show(self):
         page = self.open("phone-390", "needs")
         page.wait_for_function("document.querySelector('[data-count=order]').textContent === '3'")
