@@ -169,7 +169,7 @@
     var BASE = "/admin/stock_mgmt";
     var tabNames = ["needs", "order", "ordered", "slow"];
     var current = "needs";
-    var ui = { needs: { view: "low", showAll: false, q: "" }, slow: { days: 60, q: "", page: 1 }, ordered: { page: 1 }, open: {} };
+    var ui = { needs: { view: "low", showAll: false, q: "", cars: 30 }, slow: { days: 60, q: "", page: 1 }, ordered: { page: 1 }, open: {} };
     var panel = document.getElementById("panel");
     var banner = document.getElementById("banner");
     var toast = document.getElementById("msg");
@@ -349,15 +349,20 @@
         details.addEventListener("toggle", function () { ui.open[id] = details.open; if (details.open) { fill(); } });
         return details;
     }
-    async function loadAll(base, first) {
-        // The server sends 100 items at a time; fetch the rest so every car is in the list.
+    var CARS_FIRST = 30, CARS_STEP = 50;
+    async function loadCars(base, first, wanted) {
+        // The server sends 100 items at a time, car by car. Fetch only as many pages as are needed to have `wanted` cars
+        // (plus one, so the last car is known to be complete); the rest waits behind "Show more cars".
         var rows = first.rows.slice(), last = first, page = 1;
-        while (last.more && page < 80) {
+        function carCount() { return groupsOf(rows).length; }
+        while (last.more && carCount() < wanted + 1 && page < 80) {
             page += 1;
             last = await getData(Object.assign({}, base, { page: page }));
             rows = rows.concat(last.rows);
         }
-        return Object.assign({}, last, { rows: rows, more: false });
+        var groups = groupsOf(rows);
+        if (last.more && groups.length > 1) { groups.pop(); }      // the last car may continue on the next page: hold it back
+        return { groups: groups, total: last.total, more: last.more };
     }
     async function renderNeeds() {
         var s = ui.needs;
@@ -375,8 +380,8 @@
                 if (here === 0 && there > 0) { s.view = s.view === "low" ? "out" : "low"; switchedFor = s.q; }
             }
         }
-        var data = s.view === "low" ? await loadAll({ tab: "needs", section: "low", q: s.q }, lowFirst)
-                                    : await loadAll({ tab: "needs", section: "out", q: s.q, show_all: s.showAll ? 1 : 0 }, outFirst);
+        var data = s.view === "low" ? await loadCars({ tab: "needs", section: "low", q: s.q }, lowFirst, s.cars)
+                                    : await loadCars({ tab: "needs", section: "out", q: s.q, show_all: s.showAll ? 1 : 0 }, outFirst, s.cars);
         setBanner(lowFirst.tracking);
         var settings = lowFirst.settings;
         var urgentNow = lowFirst.rows.filter(function (r) { return (r.days_left !== null && r.days_left <= 3) || r.qty <= 1; }).length;
@@ -389,9 +394,9 @@
             tile("low", lowFirst.total, "Running low", "Items still in stock but close to running out. Tap to show them.", lowFirst.total ? "soon" : ""),
             tile("out", outFirst.total, "Sold out", "Items at zero that sold before or belong to a car dealers opened. Tap to show them.", outFirst.total ? "urgent" : ""),
             tile("order", orderCount, "On order list", "Items you have already picked to order. Tap to open the order list.", "")]);
-        var search = searchBox(s.q, function (value) { s.q = value; s.pickView = true; load(); }, "Search an item or car", "Type part of an item name or car, then press Search. If nothing matches here, it jumps to the list that has matches.");
+        var search = searchBox(s.q, function (value) { s.q = value; s.cars = CARS_FIRST; s.pickView = true; load(); }, "Search an item or car", "Type part of an item name or car, then press Search. If nothing matches here, it jumps to the list that has matches.");
         var toolsChildren = [search];
-        var groups = groupsOf(data.rows);
+        var groups = data.groups;
         var list = el("div", {});
         if (switchedFor) {
             list.appendChild(el("div", { class: "notice info", style: "display:block;position:static" }, ["Nothing " + (s.view === "out" ? "running low" : "sold out") + " matches \u201c" + switchedFor + "\u201d, so this shows the " + (s.view === "out" ? "sold-out" : "running-low") + " items that do."]));
@@ -404,10 +409,18 @@
             list.appendChild(s.view === "low" ? emptyState(s.q ? "No match in Running low" : "Nothing is running low", s.q ? hint : "Every item has enough stock for now.")
                                               : emptyState(s.showAll || s.q ? "No match in Sold out" : "Nothing sold out needs attention", s.q ? hint : (s.showAll ? "Try a different search." : "Sold-out items appear here once they have sold before.")));
         }
-        groups.forEach(function (group) { list.appendChild(bin(s.view, group, settings.low_days)); });
+        var shownGroups = groups.slice(0, s.cars);
+        shownGroups.forEach(function (group) { list.appendChild(bin(s.view, group, settings.low_days)); });
+        var shownItems = shownGroups.reduce(function (n, g) { return n + g.rows.length; }, 0);
+        var moreCars = null;
+        if (data.more || groups.length > shownGroups.length) {
+            var left = Math.max(1, data.total - shownItems);
+            moreCars = el("button", { type: "button", class: "secondary", style: "width:100%;margin-top:6px", text: "Show " + CARS_STEP + " more cars (" + left + " more items)",
+                title: "Add the next " + CARS_STEP + " cars to the list", onclick: function () { s.cars += CARS_STEP; load(); } });
+        }
         panel.replaceChildren.apply(panel, [
             note("How to read this page", "Cars are listed with the most urgent first. The bar shows how much time is left before an item runs out. Quantities to order are suggestions from recent sales; change them freely. Nothing is sent to anyone until you copy the order list yourself."),
-            tiles, el("div", { class: "tools" }, toolsChildren), list,
+            tiles, el("div", { class: "tools" }, toolsChildren), list, moreCars,
             el("p", { class: "fineprint", text: "Estimates only. Days left and selling speed come from the stock changes this site has seen since tracking began. They cannot know about seasons, big one-off orders, price changes, or items sold without a stock update. Always check before you order." })].filter(Boolean));
     }
 

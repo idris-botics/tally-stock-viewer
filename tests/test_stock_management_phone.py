@@ -239,8 +239,8 @@ class PhoneUi(unittest.TestCase):
         self.assertGreaterEqual(page.locator("#panel .item").count(), 1)
         self.assertEqual(bins.first.get_attribute("open"), "")
 
-    def test_a_long_list_still_shows_every_car(self):
-        """More than 100 low items arrive from the server in pages; every car must still be in the list."""
+    def test_a_long_list_adds_cars_in_big_steps(self):
+        """140 low items over 70 cars: 30 cars first, then 50 more per tap, with no car split or lost."""
         hierarchy, stock, names = [], [], []
         for c in range(70):
             car = f"LONGCAR{c:02d}"
@@ -257,10 +257,17 @@ class PhoneUi(unittest.TestCase):
             conn.executemany("INSERT INTO stock_state VALUES (?, ?, 1, 'x')", [(row["item_name"].upper(), row["item_name"]) for row in stock])
         self.app_module._stock_mgmt_cache_clear()
         page = self.open("phone-390", "needs")
-        page.wait_for_function("document.querySelectorAll('#panel details.bin').length === 70")      # 140 items = two pages, all 70 cars
-        self.assertEqual(page.locator("text=Show more").count(), 0)
+        page.wait_for_function("document.querySelectorAll('#panel details.bin').length === 30")
+        button = page.locator("#panel button", has_text="more cars")
+        self.assertEqual(button.count(), 1)
+        self.assertIn("50 more cars", button.inner_text())
+        button.click()
+        page.wait_for_function("document.querySelectorAll('#panel details.bin').length === 70")        # 30 + 50 is more than are left: all 70
+        self.assertEqual(page.locator("#panel button", has_text="more cars").count(), 0)
+        titles = page.evaluate("Array.from(document.querySelectorAll('#panel details.bin summary b')).map(e => e.textContent)")
+        self.assertEqual(len(set(titles)), 70)                                                          # no car shown twice or lost
 
-    def test_there_is_no_settings_box_and_no_show_more_button(self):
+    def test_there_is_no_settings_box_and_a_short_list_has_no_more_button(self):
         page = self.open("phone-390", "needs")
         text = page.locator("#panel").inner_text()
         self.assertNotIn("Settings", text)
