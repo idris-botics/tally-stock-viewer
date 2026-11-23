@@ -3665,6 +3665,9 @@ def needs_category_queue():
 
     for bucket in (tier1, tier2, tier3):
         _sort_queue_bucket(bucket, "remaining")
+    if _training_sort_by_interest():     # most-opened cars first inside each tier; the tiers themselves stay as they were
+        interest_scores = _training_interest_scores()
+        tier1, tier2, tier3 = (_order_cars_by_interest(bucket, interest_scores) for bucket in (tier1, tier2, tier3))
 
     return jsonify({
         "cars": tier1 + tier2 + tier3,
@@ -3737,6 +3740,9 @@ def needs_image_matching_queue():
 
     for bucket in (tier1, tier2, tier3):
         _sort_queue_bucket(bucket, "remaining")
+    if _training_sort_by_interest():     # most-opened cars first inside each tier; the tiers themselves stay as they were
+        interest_scores = _training_interest_scores()
+        tier1, tier2, tier3 = (_order_cars_by_interest(bucket, interest_scores) for bucket in (tier1, tier2, tier3))
 
     return jsonify({
         "cars": tier1 + tier2 + tier3,
@@ -4206,6 +4212,82 @@ def admin_delete_user(user_id):
     })
 
 
+# ---------- Training Mode: cars that people open most come first ----------
+# Only the ORDER of Training Mode's lists changes (the unmapped-image queue and the work-queue cars inside each
+# tier); no field is added, and matching, saving and suggestions are untouched. A car's score is how often it was
+# opened in the last 30 IST days (dealers, plus admins unless the Stock Management "include admin" setting is off).
+# With no interest recorded at all, or with ?sort=original, the order is exactly the one it always was.
+_train_folder_cars = {"ref": None, "size": -1, "norm": [], "by_folder": {}}
+
+
+def _training_sort_by_interest():
+    return request.args.get("sort", "") != "original"
+
+
+def _training_interest_scores():
+    """{car_key: opens in the last 30 days}, ONE aggregated query; {} when nothing has been recorded."""
+    try:
+        with db.get_connection() as conn:
+            include_admin = _stock_mgmt_settings(conn)["include_admin"]
+            roles = ("dealer", "admin") if include_admin else ("dealer",)
+            marks = ",".join("?" for _ in roles)
+            return {row[0]: row[1] for row in conn.execute(
+                f"SELECT car_key, SUM(opens) FROM car_interest_daily WHERE day_ist > ? AND role IN ({marks}) GROUP BY car_key",
+                (_ist_day_minus(30), *roles)) if row[1] and row[1] > 0}
+    except Exception as exc:
+        logger.warning("training order by interest unavailable (%s)", type(exc).__name__)
+        return {}
+
+
+def _order_cars_by_interest(entries, scores):
+    """Stable: cars with interest first (most opened first), everything else after, each group in its old order."""
+    if not scores:
+        return entries
+    return sorted(entries, key=lambda entry: -scores.get(_stock_item_key(entry.get("car")), 0))
+
+
+def _training_folder_to_car_keys(folders):
+    """{folder: car_key} the same way Training Mode already finds the car for an image's folder (an explicit folder
+    mapping first, else the first car whose name contains or is contained in the folder name), looked up once per
+    distinct folder instead of once per image."""
+    cache = _train_folder_cars
+    if cache["ref"] is not CAR_GROUPS or cache["size"] != len(CAR_GROUPS):
+        cache.update(ref=CAR_GROUPS, size=len(CAR_GROUPS), by_folder={},
+                     norm=[(car, _normalize_text(car)) for car in CAR_GROUPS if _normalize_text(car)])
+    with db.get_connection() as conn:
+        explicit = {row[0]: row[1] for row in conn.execute("SELECT folder_name, car_model_name FROM folder_car_mapping")}
+    found = {}
+    for folder in folders:
+        car = explicit.get(folder)
+        if not car:
+            if len(cache["by_folder"]) >= 5000:
+                cache["by_folder"].clear()
+            if folder not in cache["by_folder"]:
+                folder_norm = _normalize_text(folder)
+                cache["by_folder"][folder] = next(
+                    (car_name for car_name, car_norm in cache["norm"] if car_norm in folder_norm or folder_norm in car_norm), None)
+            car = cache["by_folder"][folder]
+        found[folder] = _stock_item_key(car) if car else None
+    return found
+
+
+def _order_images_by_interest(images, scores):
+    if not scores or not images:
+        return images
+    car_of = _training_folder_to_car_keys({image.get("car_folder") or "" for image in images})
+    return sorted(images, key=lambda image: -scores.get(car_of.get(image.get("car_folder") or ""), 0))
+
+
+def _unmapped_images_for_queue(limit):
+    """The unmapped-image queue: the old query, or -- when there is interest data -- all unmapped images in the
+    new order cut to the same limit."""
+    scores = _training_interest_scores() if _training_sort_by_interest() else {}
+    if not scores:
+        return db.get_unmapped_images(limit=limit)
+    ordered = _order_images_by_interest(db.get_unmapped_images(limit=None), scores)
+    return ordered[:limit] if limit is not None else ordered
+
+
 @app.route("/train")
 def train():
     load_error = ensure_data_loaded()
@@ -4220,10 +4302,12 @@ def train():
     if image_id:
         initial_image = db.get_image_by_id(image_id)
     if initial_image is None:
-        initial_image = db.get_next_unmapped_image()
+        queue_head = _unmapped_images_for_queue(1)      # the first image of the queue in the chosen order
+        initial_image = queue_head[0] if queue_head else db.get_next_unmapped_image()
 
     return render_template(
         "train.html",
+        queue_sort="interest" if _training_sort_by_interest() else "original",
         initial_image=initial_image,
         target_stock_item=stock_item,
         target_car=car,
@@ -4621,7 +4705,7 @@ def train_images():
         if folder:
             images = db.get_images_by_folder(folder, limit=limit)
         else:
-            images = db.get_unmapped_images(limit=limit if limit is not None else None)
+            images = _unmapped_images_for_queue(limit if limit is not None else None)
     except Exception:
         # fallback to safe behavior
         images = db.get_unmapped_images(limit=limit if limit is not None else MAX_IMAGE_RESPONSE_LIMIT)

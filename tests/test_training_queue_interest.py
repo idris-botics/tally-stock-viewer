@@ -136,7 +136,7 @@ class ImageQueueOrder(TrainingQueueBase):
         self.opens("CARC", "dealer", 11, 9)
         first = self.queue()["images"][0]
         self.db.add_mapping(first["id"], "CARC ITEM 1", "CARC", 1.0, "human")
-        self.assertEqual(self.names(self.queue())[:2], ["a6.jpg", "a2.jpg"])
+        self.assertEqual(self.names(self.queue())[:2], ["a6.jpg", "a1.jpg"])
 
     def test_the_limit_still_applies_after_ordering(self):
         self.standard_images()
@@ -221,16 +221,17 @@ class TrainPage(TrainingQueueBase):
         text = self.admin.get("/train").get_data(as_text=True)
         self.assertIn("Most searched cars first", text)
         self.assertIn("Original order", text)
-        self.assertIn('"car_folder": "CARC"', text.replace('":"', '": "'))
+        self.assertRegex(text, r'const initialImage = \{[^;]*"car_folder":\s*"CARC"')
         original = self.admin.get("/train", query_string={"sort": "original"}).get_data(as_text=True)
-        self.assertIn('"car_folder": "CARA"', original.replace('":"', '": "'))
+        self.assertRegex(original, r'const initialImage = \{[^;]*"car_folder":\s*"CARA"')
 
     def test_an_explicit_image_in_the_link_wins(self):
         self.standard_images()
         self.opens("CARC", "dealer", 11, 9)
         image = self.queue(sort="original")["images"][0]
         text = self.admin.get("/train", query_string={"image_id": image["id"]}).get_data(as_text=True)
-        self.assertIn(f'"id": {image["id"]}', text.replace('":', '": '))
+        head = text[text.index("const initialImage"):].split(";")[0]
+        self.assertIn('"id": %d,' % image["id"], head)
 
 
 class Speed(TrainingQueueBase):

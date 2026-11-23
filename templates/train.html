@@ -1098,6 +1098,14 @@
     <div class="grid">
         <div class="panel preview-wrap">
             <div class="field">
+                <label for="queueSortSelect">Sort by</label>
+                <select id="queueSortSelect" onchange="changeQueueSort(this.value)" title="Which cars come first in the queue and the work queue">
+                    <option value="interest"{% if queue_sort == "interest" %} selected{% endif %}>Most searched cars first</option>
+                    <option value="original"{% if queue_sort == "original" %} selected{% endif %}>Original order</option>
+                </select>
+            </div>
+
+            <div class="field">
                 <label for="ssCarQueueSelect">SS Car Folder</label>
                 <div id="ssCarQueueContainer" title="Choose which car folder's images to review">
                     <select id="ssCarQueueSelect"></select>
@@ -1239,6 +1247,24 @@
 
 <script>
 const initialImage = {{ initial_image | tojson }};
+// "Sort by" (most searched cars first / original order). The server already ordered this page's first image with the
+// same choice; the choice itself is remembered in this browser, and a different remembered choice reloads once.
+const queueSort = {{ queue_sort | tojson }};
+function changeQueueSort(value) {
+    try { window.localStorage.setItem("trainQueueSort", value); } catch (error) { /* private mode: the choice just is not remembered */ }
+    const url = new URL(window.location.href);
+    url.searchParams.set("sort", value);
+    window.location.href = url.toString();
+}
+(function applyRememberedQueueSort() {
+    let saved = null;
+    try { saved = window.localStorage.getItem("trainQueueSort"); } catch (error) { saved = null; }
+    const params = new URL(window.location.href).searchParams;
+    if ((saved === "interest" || saved === "original") && saved !== queueSort && !params.has("sort") && !params.get("image_id")) {
+        params.set("sort", saved);
+        window.location.replace(window.location.pathname + "?" + params.toString());
+    }
+})();
 const targetStockItem = {{ target_stock_item | tojson }};
 const targetCar = {{ target_car | tojson }};
 
@@ -1461,7 +1487,7 @@ async function loadWorkQueue(queueKey) {
     }
 
     try {
-        const res = await fetch(queue.url);
+        const res = await fetch(queue.url + "?sort=" + encodeURIComponent(queueSort));
         if (!res.ok) {
             throw new Error(`HTTP ${res.status}`);
         }
@@ -2799,7 +2825,7 @@ async function loadImageQueue(folderName = "") {
     // Only request images for the selected SS car folder to avoid loading the full queue.
     const queueFolder = folderName || document.getElementById("ssCarQueueSelect").value || "";
     selectedQueueFolder = queueFolder;
-    const url = queueFolder ? `/train_images?folder=${encodeURIComponent(queueFolder)}` : `/train_images?limit=200`;
+    const url = queueFolder ? `/train_images?folder=${encodeURIComponent(queueFolder)}` : `/train_images?limit=200&sort=${queueSort}`;
     const response = await fetch(url);
     if (!response.ok) {
         throw new Error(`Could not load image queue (HTTP ${response.status})`);
