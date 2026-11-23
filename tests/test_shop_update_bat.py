@@ -49,7 +49,7 @@ if args[0] == "/Run":
     if st["run_fails"]: sys.exit(1)
     if st["silent"]: sys.exit(0)
     p = subprocess.Popen([os.path.join(folder, ".venv", "Scripts", "python.exe"), "feeder.py"], cwd=folder, close_fds=True,
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x00000008 | 0x00000200)
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000 | 0x00000200)   # CREATE_NO_WINDOW | NEW_PROCESS_GROUP: a detached venv python.exe opens a console window for the interpreter it starts
     open(st["pids"], "a").write("%d\n" % p.pid); open(st["allpids"], "a").write("%d\n" % p.pid)
     sys.exit(0)
 sys.exit(0)

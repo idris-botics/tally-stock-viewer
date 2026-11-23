@@ -63,7 +63,14 @@ def main():
         if not modules:
             print("No test modules matched."); return 2
         command = [sys.executable, "-m", "unittest"] + (["-v"] if args.verbose else []) + [f"tests.{m}" for m in modules]
-        result = subprocess.run(command, cwd=scratch, env=env)
+        # On Windows the runner is started without a console window (so no window opens for it or for the processes the tests
+        # start); its output is piped and printed here, because a console-less child has no console to write to.
+        proc = subprocess.Popen(command, cwd=scratch, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        for raw_line in proc.stdout:
+            sys.stdout.write(raw_line.decode("utf-8", "replace"))
+            sys.stdout.flush()
+        result = argparse.Namespace(returncode=proc.wait())
         if args.update:
             golden_src = os.path.join(scratch, "tests", "golden")
             golden_dst = os.path.join(ROOT, "tests", "golden")
