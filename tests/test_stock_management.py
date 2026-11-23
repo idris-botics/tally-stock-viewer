@@ -44,7 +44,6 @@ class StockMgmtBase(unittest.TestCase):
         self.anon = support.client_for("anonymous")
         self.dealer = support.client_for("dealer")
         self.admin = support.client_for("admin_locked")
-        self.app_module._INTEREST_RECENT.clear()
         self.app_module._stock_mgmt_cache_clear()
         r = self.anon.post("/admin/intake/sync_data", json=catalogue_payload(self.cars, self.items_per_car), headers=INTAKE_HEADERS)
         self.assertEqual(r.status_code, 200)
@@ -117,13 +116,6 @@ class Settings(StockMgmtBase):
 
 
 class VelocityAndNeeds(StockMgmtBase):
-    def test_window_is_days_since_tracking_began_between_1_and_30(self):
-        app = self.app_module
-        self.assertEqual(app._stock_window_days(NOW - timedelta(hours=2)), 1)           # same day: at least 1
-        self.assertEqual(app._stock_window_days(NOW - timedelta(days=10)), 10)
-        self.assertEqual(app._stock_window_days(NOW - timedelta(days=400)), 30)
-        self.assertEqual(app._stock_window_days(None), 1)
-
     def test_search_text_too_long_is_refused(self):
         response = self.admin.get(BASE + "/data", query_string={"tab": "needs", "section": "sold", "q": "x" * 81})
         self.assertEqual(response.status_code, 400)
@@ -371,92 +363,6 @@ class SlowStock(StockMgmtBase):
         self.assertEqual(self.admin.get(BASE + "/data", query_string={"tab": "slow", "days": 30}).status_code, 400)
 
 
-class AskedFor(StockMgmtBase):
-    def test_counts_by_role_with_the_admin_switch(self):
-        self.interest_since(20)
-        self.in_stock(**{"CARB_ITEM_001": 1})                       # CARB: 1 of 3 in stock
-        self.opens("CARA", "dealer", 11, 2, 1)
-        self.opens("CARA", "dealer", 12, 3, 3)
-        self.opens("CARA", "dealer", 12, 4, 20)                      # 20 days ago: in the 30-day count, not the 7-day
-        self.opens("CARA", "admin", 1, 6, 2)
-        data = self.get("asked", max_items=5)
-        row = next(r for r in data["cars"] if r["car_key"] == "CARA")
-        self.assertEqual((row["dealer_opens_7"], row["dealer_opens_30"]), (5, 9))
-        self.assertEqual((row["admin_opens_7"], row["admin_opens_30"]), (6, 6))
-        self.assertEqual((row["total_7"], row["total_30"]), (11, 15))
-        self.assertEqual(row["dealers"], 2)
-        self.assertEqual((row["in_stock"], row["out_of_stock"]), (0, 3))
-        without = self.get("asked", max_items=5, include_admin=0)
-        row = next(r for r in without["cars"] if r["car_key"] == "CARA")
-        self.assertEqual((row["total_7"], row["total_30"]), (5, 9))
-
-    def test_least_stock_first_then_most_opens_and_the_max_items_filter(self):
-        self.interest_since(20)
-        self.in_stock(**{"CARB_ITEM_001": 1, "CARB_ITEM_002": 1, "CARC_ITEM_001": 1, "CARC_ITEM_002": 1, "CARC_ITEM_003": 1})
-        self.opens("CARB", "dealer", 11, 50)
-        self.opens("CARA", "dealer", 11, 2)
-        self.opens("CARC", "dealer", 11, 80)
-        self.assertEqual([r["car_key"] for r in self.get("asked", max_items=3)["cars"]], ["CARA", "CARB", "CARC"])   # 0, 2, 3 in stock
-        self.assertEqual([r["car_key"] for r in self.get("asked", max_items=2)["cars"]], ["CARA", "CARB"])
-        self.assertEqual([r["car_key"] for r in self.get("asked", max_items=0)["cars"]], ["CARA"])
-        self.opens("CARB", "dealer", 12, 60)
-        self.app_module._stock_mgmt_cache_clear()
-        self.in_stock(**{"CARB_ITEM_003": 1})
-        everything = self.get("asked", max_items=0, show_all=1)
-        self.assertEqual([r["car_key"] for r in everything["cars"]], ["CARA", "CARB", "CARC"])
-
-    def test_saved_default_is_used_when_the_switch_is_not_sent(self):
-        self.interest_since(20)
-        self.opens("CARA", "dealer", 11, 1)
-        self.opens("CARA", "admin", 1, 10)
-        self.post("/settings", {"include_admin": 0})
-        row = self.get("asked")["cars"][0]
-        self.assertEqual(row["total_30"], 1)
-
-    def test_out_of_stock_items_of_a_car(self):
-        self.interest_since(20)
-        self.in_stock(**{"CARA_ITEM_002": 1})
-        self.opens("CARA", "dealer", 11, 1)
-        data = self.get("asked", block="car_items", car="CARA")
-        self.assertEqual(self.names(data["items"]), ["CARA ITEM 001", "CARA ITEM 003"])
-        self.assertIn("suggested_qty", data["items"][0])
-
-    def test_searched_but_not_found(self):
-        self.interest_since(20)
-        self.sql("INSERT INTO search_miss_daily VALUES (?, 'zzz car', 'dealer', 4)", (day(1),))
-        self.sql("INSERT INTO search_miss_daily VALUES (?, 'zzz car', 'admin', 3)", (day(2),))
-        self.sql("INSERT INTO search_miss_daily VALUES (?, 'qqq car', 'dealer', 1)", (day(1),))
-        self.sql("INSERT INTO search_miss_daily VALUES (?, 'old car', 'dealer', 99)", (day(45),))
-        terms = self.get("asked", block="misses")["terms"]
-        self.assertEqual([(t["term"], t["dealer"], t["admin"], t["total"]) for t in terms], [("zzz car", 4, 3, 7), ("qqq car", 1, 0, 1)])
-        terms = self.get("asked", block="misses", include_admin=0)["terms"]
-        self.assertEqual([(t["term"], t["total"]) for t in terms], [("zzz car", 4), ("qqq car", 1)])
-
-    def test_tracking_started_message(self):
-        self.interest_since(2)
-        data = self.get("asked")
-        self.assertEqual(data["tracking"]["interest_since"], "2026-03-18")
-        self.assertIn("Tracking started on 2026-03-18", data["tracking"]["interest_banner"])
-
-    def test_only_counts_are_returned_never_people(self):
-        self.interest_since(20)
-        self.opens("CARA", "dealer", 11, 2)
-        self.opens("CARA", "admin", 1, 1)
-        self.sql("INSERT INTO search_miss_daily VALUES (?, 'zzz car', 'dealer', 4)", (day(1),))
-        cars = self.get("asked", max_items=5)
-        misses = self.get("asked", block="misses")
-        allowed = {"car_key", "car_name", "dealer_opens_7", "dealer_opens_30", "admin_opens_7", "admin_opens_30",
-                   "total_7", "total_30", "dealers", "in_stock", "out_of_stock"}
-        for row in cars["cars"]:
-            self.assertEqual(set(row), allowed)
-        for row in misses["terms"]:
-            self.assertEqual(set(row), {"term", "dealer", "admin", "total"})
-        text = json.dumps([cars, misses]).lower()
-        for forbidden in ('"star"', "jeewajee", "username", "user_id"):
-            self.assertNotIn(forbidden, text)
-
-
-
 class ExcelExport(StockMgmtBase):
     XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -578,8 +484,7 @@ class Performance(StockMgmtBase):
                              [(day(i % 30), f"CAR {i % 700}", i % 40) for i in range(20000)])
         timings = []
         for label, params in (("needs/sold", {"tab": "needs", "section": "sold"}), ("needs/last", {"tab": "needs", "section": "last"}), ("needs/thin", {"tab": "needs", "section": "thin"}),
-                              ("order", {"tab": "order"}), ("ordered", {"tab": "ordered"}), ("slow", {"tab": "slow", "days": 60}),
-                              ("asked", {"tab": "asked", "show_all": 1}), ("asked/misses", {"tab": "asked", "block": "misses"})):
+                              ("order", {"tab": "order"}), ("ordered", {"tab": "ordered"}), ("slow", {"tab": "slow", "days": 60})):
             self.app_module._stock_mgmt_cache_clear()
             start = time.perf_counter()
             response = self.admin.get(BASE + "/data", query_string=params)

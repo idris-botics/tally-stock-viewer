@@ -397,7 +397,7 @@ class Settings(V2Base):
     def test_defaults(self):
         self.assertEqual(self.get("sold")["settings"], {"keep_max": 3, "min_sold": 1, "window_days": 90, "last_piece_min_sold": 2,
                                                        "thin_ratio_percent": 50, "thin_min_designs": 4, "show_last_piece": 1,
-                                                       "include_admin": 1, "asked_max_items": 3})
+                                                       "include_admin": 1})
 
     def test_valid_values_are_saved_and_returned(self):
         self.setting(keep_max=10, min_sold=50, window_days=365, last_piece_min_sold=1, thin_ratio_percent=90, thin_min_designs=50, show_last_piece=0)

@@ -602,7 +602,7 @@
         var select = el("select", { "aria-label": "Days without a sale", title: "Show items whose quantity has not gone down for at least this long" }, [el("option", { value: "60", text: "60 days" }), el("option", { value: "90", text: "90 days" })]);
         select.value = String(s.days);
         select.addEventListener("change", function () { s.days = parseInt(select.value, 10); s.page = 1; load(); });
-        var parts = [note("About slow stock", "Slow stock is in stock now, but its quantity has not gone down for the chosen number of days. A restock does not count as a sale. The list only appears once the site has watched stock for at least that long, because a shorter history would be misleading."),
+        var parts = [note("About slow stock", "Slow stock is in stock now, but has not sold for the chosen number of days. It uses the shop's sales when they reach back that far, and otherwise the stock changes this site has seen. A restock does not count as a sale. The list only appears once there is enough history, because a shorter history would be misleading."),
             el("div", { class: "bar" }, [el("label", { class: "inline" }, ["Nothing sold for at least ", select])])];
         if (data.insufficient_history) {
             parts.push(emptyState("Not enough history yet", data.message));
@@ -613,7 +613,7 @@
             data.rows.forEach(function (row) {
                 parts.push(el("div", { class: "bin" }, [el("div", { class: "item" }, [el("div", { class: "name", text: row.item_name }),
                     el("div", { class: "chips" }, [chip(row.qty + " in stock", "plain", "Quantity in stock now"), chip("sitting " + row.days_sitting + " days", "warn", "Days since the quantity last went down, or since it came into stock"),
-                        chip(row.last_decrease ? "last sold " + when(row.last_decrease) : "no sale since tracking began", "plain", "Date the quantity last went down")])])]));
+                        chip(row.last_decrease ? "last sold " + when(row.last_decrease) : (data.source === "sales" ? "no sale in the sales history" : "no sale since tracking began"), "plain", data.source === "sales" ? "Date of the most recent sale" : "Date the quantity last went down")])])]));
             });
             var more = moreButton(data, function () { s.page += 1; load(); });
             if (more) { parts.push(more); }

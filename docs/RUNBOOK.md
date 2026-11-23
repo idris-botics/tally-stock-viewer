@@ -181,25 +181,55 @@ If a golden changes *on purpose*, run `python tests/check_all.py --update`, **re
 
 ## 13. Stock Management (admin only)
 
-**Where:** More menu -> **Stock Management**. Admins only (the page and every route behind it refuse dealers and visitors who are not logged in). Written for use on a phone: big text, big buttons.
+**Where:** More menu -> **Stock Management**. Admins only (the page and every route behind it refuse dealers and visitors who are not logged in). Written for use on a phone: big text, big buttons. The details of the lists and of the sales data are in section 14.
 
-**How it learns.** Nothing is typed in by hand. Every time the feeder pushes stock, the site compares it with the previous push and writes down what changed (a sale, a restock, an item that sold out, an item that came back). Stock only lists items that are in stock, so an item missing from a push means 0. It also counts how often each car is opened by dealers and by admins, and which searches found no car at all. This started the day the capture release went live, so **on day 1 the pages show little; the estimates get better each day and are reasonable after about 7 days.** A banner at the top of every tab says since when history exists.
+**How it learns.** Two sources, nothing is typed in by hand. (1) Every time the feeder pushes stock, the site compares it with the previous push and writes down what changed (a restock, an item that sold out, an item that came back). Stock only lists items that are in stock, so an item missing from a push means 0. (2) The shop-side feeder also pushes the sales lines it reads from Tally (section 14). Which cars dealers open comes from the Usage Charts activity log (`user_activity`), not from anything extra.
 
 **The four tabs**
 
 | Tab | What it shows |
 |---|---|
-| Needs restocking | *Running low*: in stock but (selling fast enough to run out within the "days left" setting, once there are 7 days of history) or at/below the "low quantity" setting. *Out of stock*: items at 0 that sold before or belong to a car dealers opened; the switch lists the whole catalogue. Each row has **Add to order list** with a suggested quantity (enough for the "order cover days" setting). |
-| Order list | What you plan to order, grouped by category. **Copy as text** (for WhatsApp), **Print**, **Mark all/ticked as ordered** (with an optional expected date). |
-| Ordered | Open orders with age, expected date and an **Overdue** badge; mark received, cancel, change the date, undo the last action. An order is marked **received by itself** when the stock of that item goes up. |
-| Slow stock | In stock but nothing sold for 60 or 90 days. Shown only once history is at least that long. |
-
-**Settings.** The page does not show a settings box for now. It uses the defaults: an item is "running low" when about 14 days or fewer are left (once there are 7 days of history) or 2 or fewer are in stock, and the suggested order covers 30 days of sales. The server still stores and checks these values, so the box can come back.
-
-**Selling speed** is the units that left stock in the last 30 days (restocks never count) divided by the days of history (1 to 30). "Days left" = quantity / speed, always labelled an estimate.
+| Needs restocking | Three lists: *Sold out*, *Last piece* and *Cars running thin* (section 14). Each design has **Add to order list** with a suggested quantity. |
+| Order list | What you plan to order, grouped by category. **Copy as text** (for WhatsApp), **Print**, **Download Excel**, **Mark all/ticked as ordered** (with an optional expected date). |
+| Ordered | Open orders with age, expected date and an **Overdue** badge; mark received, cancel, change the date, undo the last action, **Download Excel**. An order is marked **received by itself** when the stock of that item goes up. |
+| Slow stock | In stock but nothing sold for 60 or 90 days (from the sales when they reach back that far, otherwise from the stock changes). |
 
 **Safety.** A feeder push where 15% or more of the items (and at least 50) disappear at once is treated as a glitch: nothing is recorded, and only if the same picture arrives three pushes in a row (about 9 minutes) is it accepted as the new baseline, without writing sales. A failure while recording history is logged (`Stock capture failed`) and never changes the answer to the feeder or undoes a push.
 
-**Backups.** All of this lives in new tables inside the normal database (`mappings.db`), so the nightly backup and the System panel download include it automatically. Old rows are cleaned once a day (stock changes after 400 days, interest after 180).
+**Backups.** All of this lives in tables inside the normal database (`mappings.db`), so the nightly backup and the System panel download include it automatically. Old stock changes are cleaned once a day (after 400 days), sales lines after 800 days. The old `car_interest_daily` and `search_miss_daily` tables are no longer written or read and are left in the database, unused.
 
-**Training Mode** lists cars dealers open most first (control: *Sort by*, with *Original order* as the alternative).
+**Training Mode** lists cars dealers open most first (control: *Sort by*, with *Original order* as the alternative); that also comes from the Usage Charts activity log.
+
+---
+
+## 14. Stock Management v2 and sales data
+
+The shop keeps only 1 to 3 pieces of a design and reorders 1 to 3 at a time, so "days left" and "running low by quantity" say nothing. The page therefore looks at what **sold**, what is **gone**, and which **cars are thin**.
+
+**Needs restocking: the three lists** (net sold = units sold minus units returned, never below 0)
+
+- **Sold out:** designs not in stock now that sold at least *Sold at least* units in the chosen window (30, 90 or 365 days, default 90), best sellers first, grouped by car (the car with the best seller first). Each row shows how many sold, the last sale, the day it sold out (when stock changes know it) and an *Ordered <date>* badge. With no sales history covering the window, designs whose stock dropped to zero inside it are listed instead; the banner says so.
+- **Last piece:** designs with exactly 1 in stock that sold at least *Last piece: sold at least* units in the last 180 days (default 2). Can be hidden with *Show Last piece*.
+- **Cars running thin:** a car's *active* designs are those in stock now plus those that sold (net above 0) in the last 365 days. A car is thin when it has at least *Thin car: at least this many designs* (default 4) and at most *Thin car: at most this % of designs in stock* (default 50) in stock. Cars dealers opened most in the last 30 days come first, then the lowest share. *See sold-out designs* lists that car's designs that sold in the last year but are gone.
+- **Suggested quantity** is never above *Most pieces you keep of a design* (default 3): the quantity the design last reached when it was restocked (within a year), otherwise a third of its sales in the last 90 days, at least 1. You can change the number before adding it to the order list.
+
+**Settings** (top of the tab, saved on the site): most pieces you keep (1-10, default 3), sold at least (1-50, default 1), count sales over (30, 90 or 365 days), last piece sold at least (1-50, default 2), thin share (10-90 %, default 50), thin minimum designs (2-50, default 4), show Last piece, and whether admin opens count towards a car's interest (default yes). Older settings rows from the first version stay in the database and are ignored.
+
+**Sales intake (what the shop-side feeder sends).** `POST /admin/intake/sales` with the same `X-Intake-Token` as the stock push, JSON: `{"company": <sha256 of the Tally company name, 64 hex>, "from": "YYYY-MM-DD", "to": "YYYY-MM-DD", "lines": [{"v": <voucher key, 8-64 of 0-9a-f>, "d": day, "k": "sale" or "return", "i": item name (1-200), "q": whole number 1-1000000}]}`. The site **replaces** every stored line whose day is between `from` and `to` by the lines sent, in one transaction, so sending the same body twice changes nothing. At most 30,000 lines and 3 MB, a range of at most 400 days; lines with the same voucher, kind and item are added together. No customer, amount or price is ever sent or stored.
+
+| Answer | Meaning |
+|---|---|
+| 200 | Stored: `{"ok": true, "from", "to", "deleted", "inserted"}`. |
+| 401/403 | Missing or wrong token (the same answers as the stock push). |
+| 409 `company mismatch` | The company hash differs from the first one the site accepted (the "pin"). Nothing was changed. Not bypassed by the force header. |
+| 413 | Body over 3 MB. |
+| 422 `refused` | Something in the body is invalid (the message names the field and the line number, never an item name), **or** a guard refused it: an empty push when 50 or more lines are stored in its range, or a push with under 30% of the lines stored in its range when 100 or more are stored. Add the header `X-Intake-Force: 1` to push it anyway (a deliberate clean-up). |
+| 503 `busy` | Another sales push, or a database lock, did not clear within 5 seconds. The feeder simply tries again. |
+
+The sales intake has its own lock and a 5-second database timeout; it never waits for, or slows, the stock push. Sales older than 800 days are removed once a day. Items sold under a name that matches no catalogue or stock item are counted in the *Sales data* box on the Stock Management page.
+
+**The Sales data box** (collapsed, at the bottom of the page): last update and the range it covered, days stored, lines, vouchers and designs, a month table (slips, sold, returned, net), the number of sold names that match no catalogue item with a few examples, and the first 6 characters of the pinned company. **Reset company pin** (asks to confirm) forgets the pin but keeps the data; the next sales push pins its company. Use it only if the shop moved to a different Tally company file on purpose: then also consider whether old sales lines should be cleared by a forced push over the whole range.
+
+**Slow stock** uses the sales when their history reaches back at least the chosen 60 or 90 days (a design that never sold in that history counts from the history's first day; a design that came into stock after its last sale starts waiting from then); otherwise it uses the stock changes and keeps the "tracking only since ..." message.
+
+**Day 1.** Before any sales arrive, Sold out falls back to designs whose stock dropped to zero since tracking began, Last piece and Cars running thin stay empty (they need sales to tell what sells), and the banner says "No sales history yet."

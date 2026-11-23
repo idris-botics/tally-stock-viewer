@@ -28,8 +28,6 @@ class CaptureBase(unittest.TestCase):
 
     def setUp(self):
         self.clear_tables()
-        self.app_module._INTEREST_RECENT.clear()
-        self.app_module._SEARCH_MISS_LAST.clear()
         self.anon = support.client_for("anonymous")
         self.dealer = support.client_for("dealer")
         self.admin = support.client_for("admin_locked")
@@ -188,8 +186,8 @@ class StockCapture(CaptureBase):
         with self.at(2026, 1, 15, 6, 30):
             self.capture(items(5, qty=4))                          # first call of the day: prunes
             self.assertEqual(self.rows("SELECT COUNT(*) FROM stock_events WHERE item_key = 'OLD'"), [(0,)])
-            self.assertEqual(self.rows("SELECT COUNT(*) FROM car_interest_daily"), [(0,)])
-            self.assertEqual(self.rows("SELECT COUNT(*) FROM search_miss_daily"), [(0,)])
+            self.assertEqual(self.rows("SELECT COUNT(*) FROM car_interest_daily"), [(1,)])           # the unused interest tables are no longer pruned
+            self.assertEqual(self.rows("SELECT COUNT(*) FROM search_miss_daily"), [(1,)])
             self.assertEqual(self.meta("last_prune_day_ist"), "2026-01-15")
             with self.db.get_connection() as conn:                 # put old rows back: the same day must not prune again
                 conn.execute("INSERT INTO stock_events (day_ist, item_key, item_name, qty_before, qty_after, at_utc) VALUES "
@@ -229,106 +227,6 @@ class StockCapture(CaptureBase):
         print(f"\n  capture timing: first {first * 1000:.0f} ms, no change {same * 1000:.0f} ms, 200 changes {busy * 1000:.0f} ms")
         self.assertLess(max(first, same, busy), 1.0)               # generous: the target is well under 100 ms
         self.assertEqual(len(self.events()), 200)
-
-
-class CarInterest(CaptureBase):
-    def interest(self):
-        return self.rows("SELECT day_ist, car_key, role, user_id, opens FROM car_interest_daily")
-
-    def misses(self):
-        return self.rows("SELECT day_ist, term, role, count FROM search_miss_daily ORDER BY term")
-
-    def test_opening_a_car_counts_once_per_user_day_and_role(self):
-        with self.at(2026, 1, 15, 6, 30):
-            self.assertEqual(self.dealer.get("/designs", query_string={"car": "ALTO"}).status_code, 200)
-            self.dealer.get("/designs", query_string={"car": "ALTO"})          # a reload: inside 10 minutes
-        dealer_id = self.rows("SELECT id FROM users WHERE username = 'star'")[0][0]
-        self.assertEqual(self.interest(), [("2026-01-15", "ALTO", "dealer", dealer_id, 1)])
-        self.assertTrue(self.meta("interest_tracking_started_at_utc"))
-
-    def test_opening_again_after_ten_minutes_counts_again(self):
-        clock = {"now": 1000.0}
-        with mock.patch.object(self.app_module, "_interest_clock", side_effect=lambda: clock["now"]):
-            self.dealer.get("/designs", query_string={"car": "ALTO"})
-            clock["now"] += 599
-            self.dealer.get("/designs", query_string={"car": "ALTO"})
-            self.assertEqual(self.interest()[0][4], 1)
-            clock["now"] += 2
-            self.dealer.get("/designs", query_string={"car": "ALTO"})
-        self.assertEqual(self.interest()[0][4], 2)
-
-    def test_two_cars_are_counted_separately(self):
-        self.dealer.get("/designs", query_string={"car": "ALTO"})
-        self.dealer.get("/designs", query_string={"car": "SWIFT"})
-        self.assertEqual(sorted(r[1] for r in self.interest()), ["ALTO", "SWIFT"])
-
-    def test_admin_is_recorded_with_role_admin_and_usage_charts_are_unchanged(self):
-        self.admin.get("/designs", query_string={"car": "ALTO"})
-        self.assertEqual([r[2] for r in self.interest()], ["admin"])
-
-    def test_unknown_car_names_are_not_stored(self):
-        self.dealer.get("/designs", query_string={"car": "NOT A REAL CAR"})
-        self.assertEqual(self.interest(), [])
-
-    def test_anonymous_and_failed_requests_record_nothing(self):
-        self.anon.get("/designs", query_string={"car": "ALTO"})
-        self.assertEqual(self.interest(), [])
-
-    def test_recording_error_never_breaks_the_car_page(self):
-        expected = self.dealer.get("/designs", query_string={"car": "SWIFT"}).get_data()
-        self.app_module._INTEREST_RECENT.clear()
-        with mock.patch.object(self.app_module, "_record_car_open", side_effect=RuntimeError("boom")):
-            response = self.dealer.get("/designs", query_string={"car": "SWIFT"})
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_data(), expected)
-
-    def test_search_with_no_result_is_a_miss(self):
-        with self.at(2026, 1, 15, 6, 30):
-            self.dealer.get("/api/search_cars", query_string={"q": "  Zzzz   Wwww "})
-        self.assertEqual(self.misses(), [("2026-01-15", "zzzz wwww", "dealer", 1)])
-        self.assertTrue(self.meta("interest_tracking_started_at_utc"))
-
-    def test_search_with_results_and_short_terms_are_not_recorded(self):
-        self.dealer.get("/api/search_cars", query_string={"q": "alto"})
-        self.dealer.get("/api/search_cars", query_string={"q": "zz"})
-        self.dealer.get("/api/search_cars", query_string={"q": ""})
-        self.dealer.get("/api/search_cars", query_string={"q": "zzzz", "page": 2})
-        self.assertEqual(self.misses(), [])
-
-    def test_same_search_twice_counts_once(self):
-        self.dealer.get("/api/search_cars", query_string={"q": "qqqq"})
-        self.dealer.get("/api/search_cars", query_string={"q": "qqqq"})
-        self.assertEqual([m[3] for m in self.misses()], [1])
-
-    def test_typing_forward_keeps_only_the_final_term(self):
-        for term in ("qqq", "qqqq", "qqqqx"):
-            self.dealer.get("/api/search_cars", query_string={"q": term})
-        self.assertEqual([(m[1], m[3]) for m in self.misses()], [("qqqqx", 1)])
-
-    def test_backspacing_does_not_add_a_shorter_term(self):
-        self.dealer.get("/api/search_cars", query_string={"q": "qqqqx"})
-        self.dealer.get("/api/search_cars", query_string={"q": "qqqq"})
-        self.assertEqual([(m[1], m[3]) for m in self.misses()], [("qqqqx", 1)])
-
-    def test_admin_search_misses_are_a_separate_role(self):
-        self.dealer.get("/api/search_cars", query_string={"q": "nonecar"})
-        self.admin.get("/api/search_cars", query_string={"q": "nonecar"})
-        self.assertEqual(sorted((m[1], m[2], m[3]) for m in self.misses()), [("nonecar", "admin", 1), ("nonecar", "dealer", 1)])
-
-    def test_search_recording_error_never_breaks_search(self):
-        expected = self.dealer.get("/api/search_cars", query_string={"q": "alto"}).get_data()
-        with mock.patch.object(self.app_module, "_record_search_miss", side_effect=RuntimeError("boom")):
-            response = self.dealer.get("/api/search_cars", query_string={"q": "nonecar"})
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.dealer.get("/api/search_cars", query_string={"q": "alto"}).get_data(), expected)
-
-    def test_throttle_memory_is_bounded(self):
-        limit = self.app_module.INTEREST_MAX_TRACKED
-        for i in range(limit):
-            self.app_module._INTEREST_RECENT[(i, "X")] = 0.0       # the map is full
-        self.app_module._record_car_open(999999, "dealer", "ALTO")  # a new key arrives: the map is cleared first
-        self.assertLessEqual(len(self.app_module._INTEREST_RECENT), limit)
-        self.assertEqual(len(self.app_module._INTEREST_RECENT), 1)
 
 
 if __name__ == "__main__":

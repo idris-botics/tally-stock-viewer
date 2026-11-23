@@ -6167,36 +6167,21 @@ def _apply_intake_files_as_one_unit(car_master, main_hierarchy, item_stock):
 # ============================================================
 # STOCK MANAGEMENT, PART A -- silent capture (no pages)
 # ============================================================
-# Two things are remembered, both in the main database (so the nightly backup carries them):
+# Stock changes are remembered in the main database (so the nightly backup carries them):
 #   * stock history: every accepted feeder push is compared with the last accepted one and the differences are
 #     written as stock_events. item_stock only lists items with qty > 0, so an item missing from a push is 0.
-#   * interest: how often each car is opened (dealer and admin counted separately) and which searches found no car.
 # Nothing here may ever fail a push or a page: every caller wraps these in try/except and only logs.
 STOCK_PRUNE_EVENT_DAYS = 400
-STOCK_PRUNE_INTEREST_DAYS = 180
 STOCK_SUSPICIOUS_MIN_VANISHED = 50
 STOCK_SUSPICIOUS_PERCENT = 15
 STOCK_SUSPICIOUS_ACCEPT_AFTER = 3          # consecutive suspicious pushes (about 9 minutes) before the new level is trusted
-INTEREST_THROTTLE_SECONDS = 600
-INTEREST_MAX_TRACKED = 5000
-SEARCH_MISS_PREFIX_SECONDS = 60
-SEARCH_MISS_MIN_CHARS = 3
-SEARCH_MISS_MAX_CHARS = 60
 
 _STOCK_CAPTURE_LOCK = threading.Lock()
-_INTEREST_LOCK = threading.Lock()
-_INTEREST_RECENT = {}      # (user_id, car_key) -> monotonic time the open was last counted
-_SEARCH_MISS_LAST = {}     # user_id -> (term, monotonic time, day_ist) of that user's last recorded miss
-_known_car_keys_cache = {"ref": None, "size": -1, "keys": frozenset()}
 
 
 def _stock_now_utc():
     """The one clock of this feature (a test replaces it). Always timezone-aware UTC."""
     return datetime.now(timezone.utc)
-
-
-def _interest_clock():
-    return time.monotonic()
 
 
 def _today_ist():
@@ -6260,13 +6245,11 @@ def _auto_receive_orders(events, conn=None):
 
 
 def _prune_stock_history(conn, day):
-    """Once per IST day: stock events older than 400 days, interest and search rows older than 180 days."""
+    """Once per IST day: stock events older than 400 days. (The old car_interest_daily and search_miss_daily tables are no
+    longer written, read or pruned; they stay in the database, unused.)"""
     if _capture_meta_get(conn, "last_prune_day_ist") == day:
         return
     conn.execute("DELETE FROM stock_events WHERE day_ist < ?", (_ist_day_minus(STOCK_PRUNE_EVENT_DAYS),))
-    cutoff = _ist_day_minus(STOCK_PRUNE_INTEREST_DAYS)
-    conn.execute("DELETE FROM car_interest_daily WHERE day_ist < ?", (cutoff,))
-    conn.execute("DELETE FROM search_miss_daily WHERE day_ist < ?", (cutoff,))
     _capture_meta_set(conn, "last_prune_day_ist", day)
 
 
@@ -6348,134 +6331,22 @@ def _capture_stock_changes(item_stock_clean):
         _prune_stock_history(conn, day)
 
 
-def _normalize_interest_term(text):
-    return re.sub(r"\s+", " ", str(text or "")).strip().lower()[:SEARCH_MISS_MAX_CHARS]
-
-
-def _known_car_keys():
-    """The cleaned names of the cars being served now (rebuilt only when the car list object changes)."""
-    cars = CAR_GROUPS
-    cache = _known_car_keys_cache
-    if cache["ref"] is not cars or cache["size"] != len(cars):
-        cache.update(ref=cars, size=len(cars), keys=frozenset(_stock_item_key(c) for c in cars))
-    return cache["keys"]
-
-
-def _interest_role():
-    role = _current_role()
-    return "admin" if role == "admin" else "dealer" if role == "customer" else None
-
-
-def _interest_mark_tracking_started(conn):
-    conn.execute("INSERT OR IGNORE INTO capture_meta (key, value) VALUES ('interest_tracking_started_at_utc', ?)",
-                 (_stock_now_utc().strftime("%Y-%m-%dT%H:%M:%S"),))
-
-
-def _record_car_open(user_id, role, car_name):
-    """Counts one open of a car for (today, car, role, user). The same user opening the same car again within
-    10 minutes (a reload) is not counted again."""
-    car_key = _stock_item_key(car_name)
-    if not car_key:
-        return
-    slot = (int(user_id), car_key)
-    now = _interest_clock()
-    with _INTEREST_LOCK:
-        last = _INTEREST_RECENT.get(slot)
-        if last is not None and now - last < INTEREST_THROTTLE_SECONDS:
-            return
-        if len(_INTEREST_RECENT) >= INTEREST_MAX_TRACKED and slot not in _INTEREST_RECENT:
-            _INTEREST_RECENT.clear()
-        _INTEREST_RECENT[slot] = now          # claimed before the write, so a failing database is not hammered
-    with db.get_connection() as conn:
-        conn.execute(
-            "INSERT INTO car_interest_daily (day_ist, car_key, role, user_id, opens) VALUES (?, ?, ?, ?, 1) "
-            "ON CONFLICT(day_ist, car_key, role, user_id) DO UPDATE SET opens = opens + 1",
-            (_today_ist(), car_key, role, int(user_id)),
-        )
-        _interest_mark_tracking_started(conn)
-
-
-def _record_search_miss(user_id, role, query):
-    """Counts a search that found no car, once per (today, term, role). The search box fires on every keystroke, so
-    a term that only extends this user's previous miss (within 60 seconds) replaces it instead of adding another,
-    and a shorter term (the user backspacing) is skipped."""
-    term = _normalize_interest_term(query)
-    if len(term) < SEARCH_MISS_MIN_CHARS:
-        return
-    day = _today_ist()
-    now = _interest_clock()
-    replaced_day = replaced_term = None
-    with _INTEREST_LOCK:
-        previous = _SEARCH_MISS_LAST.get(int(user_id))
-        if previous is not None and now - previous[1] < SEARCH_MISS_PREFIX_SECONDS:
-            if previous[0].startswith(term):
-                return                                   # same term again, or a shorter prefix of the last one
-            if term.startswith(previous[0]):
-                replaced_term, replaced_day = previous[0], previous[2]
-        elif previous is not None and previous[0] == term and now - previous[1] < INTEREST_THROTTLE_SECONDS:
-            return
-        if len(_SEARCH_MISS_LAST) >= INTEREST_MAX_TRACKED and int(user_id) not in _SEARCH_MISS_LAST:
-            _SEARCH_MISS_LAST.clear()
-        _SEARCH_MISS_LAST[int(user_id)] = (term, now, day)
-    with db.get_connection() as conn:
-        if replaced_term is not None:
-            conn.execute("UPDATE search_miss_daily SET count = count - 1 WHERE day_ist = ? AND term = ? AND role = ?",
-                         (replaced_day, replaced_term, role))
-            conn.execute("DELETE FROM search_miss_daily WHERE day_ist = ? AND term = ? AND role = ? AND count <= 0",
-                         (replaced_day, replaced_term, role))
-        conn.execute(
-            "INSERT INTO search_miss_daily (day_ist, term, role, count) VALUES (?, ?, ?, 1) "
-            "ON CONFLICT(day_ist, term, role) DO UPDATE SET count = count + 1",
-            (day, term, role),
-        )
-        _interest_mark_tracking_started(conn)
-
-
-@app.after_request
-def _record_stock_interest(response):
-    """Server-side only: it rides on the /designs and car-search requests that already happen (no new request, no
-    polling). Any problem is logged by class name and ignored."""
-    try:
-        if response.status_code != 200:          # only a successful answer is counted (not a redirect, 204, 304 or an error)
-            return response
-        endpoint = request.endpoint
-        if endpoint not in ("designs", "search.search_cars"):
-            return response
-        user_id, role = _current_user_id(), _interest_role()
-        if user_id is None or role is None:
-            return response
-        if endpoint == "designs":
-            car = (request.args.get("car") or "").strip()
-            if car and _stock_item_key(car) in _known_car_keys():
-                _record_car_open(user_id, role, car)
-        elif request.args.get("page", 1, type=int) == 1 and not request.args.get("anchor_id"):
-            query = request.args.get("q", "")
-            if len(_normalize_interest_term(query)) >= SEARCH_MISS_MIN_CHARS:
-                payload = response.get_json(silent=True)
-                if isinstance(payload, dict) and payload.get("results") == []:
-                    _record_search_miss(user_id, role, query)
-    except Exception as exc:
-        logger.warning("stock interest tracking failed (%s)", type(exc).__name__)
-    return response
-
-
 # ============================================================
 # STOCK MANAGEMENT, PART B -- the admin pages
 # ============================================================
 # One admin-only page (/admin/stock_mgmt) with five tabs, fed by ONE admin-only JSON route that returns at most 100
 # rows per answer, plus two POST routes for the order list / orders and one for the settings. Everything is computed
-# from the capture tables (stock_state, stock_events, car_interest_daily, search_miss_daily) with SQL aggregates and
+# from the capture tables (stock_state, stock_events) and the sales lines with SQL aggregates and
 # from the hierarchy the app already keeps in memory -- the stock files are never re-read here.
 STOCK_MGMT_PAGE_SIZE = 100
 STOCK_MGMT_CACHE_SECONDS = 60
 STOCK_MGMT_CACHE_MAX = 50
-STOCK_MGMT_SALES_DAYS = 30
 STOCK_MGMT_MIN_HISTORY_DAYS = 7
 STOCK_MGMT_MAX_QTY = 100000
 STOCK_MGMT_MAX_NOTE = 200
 STOCK_MGMT_MAX_SEARCH = 80
 STOCK_MGMT_MAX_LINES = 2000
-STOCK_MGMT_TABS = ("needs", "order", "ordered", "slow", "asked")
+STOCK_MGMT_TABS = ("needs", "order", "ordered", "slow")
 STOCK_MGMT_SETTING_LIMITS = {          # key -> (lowest, highest, default)
     "keep_max": (1, 10, 3),                # the most pieces the shop keeps of one design
     "min_sold": (1, 50, 1),                # units a sold-out design must have sold in the window to be listed
@@ -6485,7 +6356,6 @@ STOCK_MGMT_SETTING_LIMITS = {          # key -> (lowest, highest, default)
     "thin_min_designs": (2, 50, 4),        # a car needs at least this many active designs to be called thin
     "show_last_piece": (0, 1, 1),
     "include_admin": (0, 1, 1),            # admin opens count towards a car's interest
-    "asked_max_items": (0, 1000, 3),       # only the old Asked-for code reads this
 }
 STOCK_MGMT_WINDOW_CHOICES = (30, 90, 365)
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
@@ -6536,13 +6406,6 @@ def _ist_date(moment):
 
 def _today_ist_date():
     return _ist_date(_stock_now_utc())
-
-
-def _stock_window_days(started_utc):
-    """Days of history the selling speed is spread over: days since tracking began, at least 1 and at most 30."""
-    if started_utc is None:
-        return 1
-    return max(1, min(STOCK_MGMT_SALES_DAYS, (_today_ist_date() - _ist_date(started_utc)).days))
 
 
 def _stock_tracking_info(conn):
@@ -6653,19 +6516,6 @@ def _stock_open_orders(conn):
             moment = _parse_utc(ordered_at)
             found[item_key] = {"id": order_id, "ordered_on": _ist_date(moment).isoformat() if moment else None}
     return found
-
-
-def _stock_sales(conn):
-    """{item_key: units sold in the last 30 IST days}. Only decreases count; a restock is never a negative sale."""
-    return {row[0]: row[1] for row in conn.execute(
-        "SELECT item_key, SUM(qty_before - qty_after) FROM stock_events WHERE day_ist > ? AND qty_before > qty_after GROUP BY item_key",
-        (_ist_day_minus(STOCK_MGMT_SALES_DAYS),))}
-
-
-def _stock_suggested_qty(speed, qty_now, cover_days):
-    if speed > 0:
-        return max(1, int(math.ceil(speed * cover_days)) - qty_now)
-    return 1
 
 
 def _stock_car_of(item_key, catalogue):
@@ -6902,8 +6752,32 @@ def _stock_tab_ordered(conn, page):
 
 
 def _stock_tab_slow(conn, days, q, page):
+    """Items in stock that have not sold for at least `days` days. From the sales history when it reaches back at least
+    that far (last day with a 'sale' line; an item never sold in that history counts from the history's first day);
+    otherwise from the stock changes the site has seen, with the 'tracking only since' message."""
     tracking = _stock_tracking_info(conn)
-    payload = {"tab": "slow", "days": days, "tracking": tracking}
+    today = _today_ist_date()
+    first_day = conn.execute("SELECT MIN(day) FROM sales_lines").fetchone()[0]
+    query = _stock_item_key(q)
+    if first_day and (today - datetime.strptime(first_day, "%Y-%m-%d").date()).days >= days:
+        last_sale = {row[0]: row[1] for row in conn.execute("SELECT item_key, MAX(day) FROM sales_lines WHERE kind = 'sale' GROUP BY item_key")}
+        arrived = {row[0]: row[1] for row in conn.execute("SELECT item_key, MAX(day_ist) FROM stock_events WHERE qty_before = 0 AND qty_after > 0 GROUP BY item_key")}
+        rows = []
+        for key, (name, qty) in _stock_state_map(conn).items():
+            if query and query not in key:
+                continue
+            since = last_sale.get(key) or first_day
+            if arrived.get(key) and arrived[key] > since:                 # it came into stock after its last sale: it has only just started waiting
+                since = arrived[key]
+            sitting = (today - datetime.strptime(since, "%Y-%m-%d").date()).days
+            if sitting >= days:
+                rows.append(((-sitting, -qty, key), {"item_key": key, "item_name": name, "qty": qty, "last_sold": last_sale.get(key),
+                                                     "last_decrease": last_sale.get(key), "days_sitting": sitting}))
+        rows.sort(key=lambda pair: pair[0])
+        payload = _stock_page([row for _key, row in rows], page)
+        payload.update(tab="slow", days=days, tracking=tracking, source="sales")
+        return payload
+    payload = {"tab": "slow", "days": days, "tracking": tracking, "source": "stock_changes"}
     if tracking["stock_since"] is None or tracking["stock_days"] < days:
         since = tracking["stock_since"]
         if since is None:
@@ -6913,13 +6787,11 @@ def _stock_tab_slow(conn, days, q, page):
             payload["message"] = f"Tracking only since {since} ({_plural(tracking['stock_days'], 'day')}). This list will appear after {ready.isoformat()}."
         payload["insufficient_history"] = True
         return payload
-    today = _today_ist_date()
     started = datetime.strptime(tracking["stock_since"], "%Y-%m-%d").date()
     last_decrease = {row[0]: row[1] for row in conn.execute(
         "SELECT item_key, MAX(day_ist) FROM stock_events WHERE qty_before > qty_after GROUP BY item_key")}
     last_arrival = {row[0]: row[1] for row in conn.execute(
         "SELECT item_key, MAX(day_ist) FROM stock_events WHERE qty_before = 0 AND qty_after > 0 GROUP BY item_key")}
-    query = _stock_item_key(q)
     rows = []
     for key, (name, qty) in _stock_state_map(conn).items():
         if query and query not in key:
@@ -6932,76 +6804,6 @@ def _stock_tab_slow(conn, days, q, page):
                                               "last_decrease": last_decrease.get(key), "days_sitting": sitting}))
     rows.sort(key=lambda r: r[:3])
     payload.update(_stock_page([r[3] for r in rows], page))
-    return payload
-
-
-def _stock_tab_asked(conn, block, q, page, car, max_items, include_admin, show_all):
-    settings = _stock_mgmt_settings(conn)
-    include_admin = settings["include_admin"] if include_admin is None else include_admin
-    max_items = settings["asked_max_items"] if max_items is None else max_items
-    tracking = _stock_tracking_info(conn)
-    cut30, cut7 = _ist_day_minus(30), _ist_day_minus(7)
-    if block == "misses":
-        terms = []
-        for term, dealer, admin in conn.execute(
-                "SELECT term, SUM(CASE WHEN role = 'dealer' THEN count ELSE 0 END), SUM(CASE WHEN role = 'admin' THEN count ELSE 0 END) "
-                "FROM search_miss_daily WHERE day_ist > ? GROUP BY term", (cut30,)):
-            total = dealer + (admin if include_admin else 0)
-            if total > 0:
-                terms.append((-total, term, {"term": term, "dealer": dealer, "admin": admin, "total": total}))
-        terms.sort(key=lambda r: r[:2])
-        payload = _stock_page([r[2] for r in terms], page)
-        payload["terms"] = payload.pop("rows")
-        payload.update(tab="asked", block="misses", tracking=tracking, settings=settings)
-        return payload
-    state = _stock_state_map(conn)
-    catalogue = _stock_catalogue()
-    if block == "car_items":
-        car_key = _stock_item_key(car)
-        entry = catalogue["cars"].get(car_key)
-        sold, orders, window = _stock_sales(conn), _stock_open_orders(conn), _stock_window_days(_parse_utc(_capture_meta_get(conn, "stock_tracking_started_at_utc")))
-        on_list = {row[0] for row in conn.execute("SELECT item_key FROM restock_draft")}
-        rows = []
-        for item_key in (entry[1] if entry else []):
-            if item_key in state:
-                continue
-            speed = sold.get(item_key, 0) / window
-            name = catalogue["items"][item_key][0]
-            rows.append((name, {"item_key": item_key, "item_name": name, "speed": round(speed, 1), "open_order": orders.get(item_key),
-                                "on_order_list": item_key in on_list,
-                                "suggested_qty": _stock_suggested_qty(speed, 0, 30)}))
-        rows.sort(key=lambda r: r[0])
-        payload = _stock_page([r[1] for r in rows], page)
-        payload["items"] = payload.pop("rows")
-        payload.update(tab="asked", block="car_items", car_key=car_key, tracking=tracking, settings=settings)
-        return payload
-    cars = []
-    for car_key, d7, d30, a7, a30, dealers in conn.execute(
-            "SELECT car_key, SUM(CASE WHEN role = 'dealer' AND day_ist > ? THEN opens ELSE 0 END), "
-            "SUM(CASE WHEN role = 'dealer' THEN opens ELSE 0 END), "
-            "SUM(CASE WHEN role = 'admin' AND day_ist > ? THEN opens ELSE 0 END), "
-            "SUM(CASE WHEN role = 'admin' THEN opens ELSE 0 END), "
-            "COUNT(DISTINCT CASE WHEN role = 'dealer' THEN user_id END) "
-            "FROM car_interest_daily WHERE day_ist > ? GROUP BY car_key", (cut7, cut7, cut30)):
-        total_7, total_30 = d7 + (a7 if include_admin else 0), d30 + (a30 if include_admin else 0)
-        if total_30 <= 0:
-            continue
-        entry = catalogue["cars"].get(car_key)
-        item_keys = entry[1] if entry else []
-        in_stock = sum(1 for key in item_keys if key in state)
-        if not show_all and in_stock > max_items:
-            continue
-        if q and _stock_item_key(q) not in car_key:
-            continue
-        cars.append((in_stock, -total_30, car_key, {
-            "car_key": car_key, "car_name": entry[0] if entry else car_key, "dealer_opens_7": d7, "dealer_opens_30": d30,
-            "admin_opens_7": a7, "admin_opens_30": a30, "total_7": total_7, "total_30": total_30, "dealers": dealers,
-            "in_stock": in_stock, "out_of_stock": len(item_keys) - in_stock}))
-    cars.sort(key=lambda r: r[:3])
-    payload = _stock_page([r[3] for r in cars], page)
-    payload["cars"] = payload.pop("rows")
-    payload.update(tab="asked", block="cars", tracking=tracking, settings=settings, max_items=max_items,
-                   include_admin=include_admin, show_all=bool(show_all))
     return payload
 
 
@@ -7023,23 +6825,13 @@ def _stock_mgmt_args():
     days = args.get("days", 60, type=int)
     if days not in (60, 90):
         raise _StockMgmtError("Days must be 60 or 90")
-    block = args.get("block", "cars")
-    if block not in ("cars", "misses", "car_items"):
+    block = args.get("block", "")
+    if block not in ("", "car_items"):
         raise _StockMgmtError("Unknown block")
     car = (args.get("car") or "").strip()
     if len(car) > 200:
         raise _StockMgmtError("Car name is too long")
-    max_items = args.get("max_items", None, type=int) if args.get("max_items") not in (None, "") else None
-    if max_items is not None and not 0 <= max_items <= 1000:
-        raise _StockMgmtError("max_items must be 0 to 1000")
-    include_admin = None
-    if args.get("include_admin") not in (None, ""):
-        include_admin = args.get("include_admin", type=int)
-        if include_admin not in (0, 1):
-            raise _StockMgmtError("include_admin must be 0 or 1")
-    show_all = 1 if args.get("show_all") in ("1", "true") else 0
-    return dict(tab=tab, q=q, page=page, section=section, days=days, block=block, car=car, max_items=max_items,
-                include_admin=include_admin, show_all=show_all)
+    return dict(tab=tab, q=q, page=page, section=section, days=days, block=block, car=car)
 
 
 def _stock_mgmt_json_body():
@@ -7078,10 +6870,7 @@ def stock_mgmt_data():
                     return _stock_tab_order(conn)
                 if tab == "ordered":
                     return _stock_tab_ordered(conn, params["page"])
-                if tab == "slow":
-                    return _stock_tab_slow(conn, params["days"], params["q"], params["page"])
-                return _stock_tab_asked(conn, params["block"], params["q"], params["page"], params["car"],
-                                        params["max_items"], params["include_admin"], params["show_all"])
+                return _stock_tab_slow(conn, params["days"], params["q"], params["page"])
         return jsonify(_stock_mgmt_cached(key, compute))
     except Exception as exc:
         return _stock_mgmt_failure(exc)
