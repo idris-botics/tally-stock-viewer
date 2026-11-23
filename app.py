@@ -6526,17 +6526,6 @@ def _stock_car_of(item_key, catalogue):
     return "Other (not under a car)"
 
 
-def _stock_group_rows(rows):
-    """rows: [(sort_tuple, row_dict)] -> row dicts ordered car by car. The car with the most urgent item comes first,
-    and inside a car the most urgent item comes first, so the top of every list is still what needs doing soonest."""
-    best = {}
-    for sort_key, row in rows:
-        car = row["car"]
-        if car not in best or sort_key < best[car]:
-            best[car] = sort_key
-    rows.sort(key=lambda pair: (best[pair[1]["car"]], pair[1]["car"], pair[0]))
-    return [row for _key, row in rows]
-
 def _stock_page(rows, page):
     start = (page - 1) * STOCK_MGMT_PAGE_SIZE
     return {"rows": rows[start:start + STOCK_MGMT_PAGE_SIZE], "total": len(rows), "page": page,
@@ -6583,12 +6572,17 @@ def _stock_needs_compute(conn, settings):
     window = settings["window_days"]
     d_window, d90, d180, d365 = (_ist_day_minus(n - 1) for n in (window, 90, 180, 365))
     sales = {}
-    for key, name, net_w, net_90, net_180, net_365, last in conn.execute(
-            f"SELECT item_key, MAX(item_name), SUM(CASE WHEN day >= ? THEN {_SALES_NET} ELSE 0 END), "
+    for key, net_w, net_90, net_180, net_365, last in conn.execute(
+            f"SELECT item_key, SUM(CASE WHEN day >= ? THEN {_SALES_NET} ELSE 0 END), "
             f"SUM(CASE WHEN day >= ? THEN {_SALES_NET} ELSE 0 END), SUM(CASE WHEN day >= ? THEN {_SALES_NET} ELSE 0 END), "
             f"SUM({_SALES_NET}), MAX(CASE WHEN kind = 'sale' THEN day END) FROM sales_lines WHERE day >= ? GROUP BY item_key",
             (d_window, d90, d180, d365)):
-        sales[key] = {"name": name, "w": max(0, net_w), "n90": max(0, net_90), "n180": max(0, net_180), "n365": net_365, "last": last}
+        sales[key] = {"name": None, "w": max(0, net_w), "n90": max(0, net_90), "n180": max(0, net_180), "n365": net_365, "last": last}
+    unknown = [key for key in sales if key not in catalogue["items"]]       # names are only needed for designs the catalogue does not know
+    for start in range(0, len(unknown), 500):
+        chunk = unknown[start:start + 500]
+        for key, name in conn.execute(f"SELECT item_key, MAX(item_name) FROM sales_lines WHERE item_key IN ({','.join('?' for _ in chunk)}) GROUP BY item_key", chunk):
+            sales[key]["name"] = name
     first_day = conn.execute("SELECT MIN(day) FROM sales_lines").fetchone()[0]
     covers = first_day is not None and first_day <= d_window       # the sales history reaches back over the whole window
     zero_events = {row[0]: (row[1], row[2]) for row in conn.execute(
@@ -6603,9 +6597,9 @@ def _stock_needs_compute(conn, settings):
             return min(keep_max, max(1, usual[key]))
         return min(keep_max, max(1, int(math.ceil((sales.get(key) or {}).get("n90", 0) / 3.0))))
 
-    def make_row(key, name, sold, window_days, last, since):
+    def make_row(key, name, sold, window_days, last, since, car=None):
         entry = catalogue["items"].get(key)
-        return {"item_key": key, "item_name": entry[0] if entry else name or key, "car": _stock_car_of(key, catalogue), "sold": sold,
+        return {"item_key": key, "item_name": entry[0] if entry else name or key, "car": car or _stock_car_of(key, catalogue), "sold": sold,
                 "window_days": window_days, "last_sold": last, "sold_out_since": since, "open_order": orders.get(key),
                 "on_order_list": key in on_list, "suggested_qty": suggested(key)}
 
@@ -6618,13 +6612,13 @@ def _stock_needs_compute(conn, settings):
         for key, (name, zero_day) in zero_events.items():
             if key not in state and key not in candidates and zero_day >= d_window:
                 candidates[key] = (sales.get(key) or {}).get("name") or name
+    # Only light tuples are kept for the long lists (there can be thousands); the row dictionaries are built for the 100 that are sent.
     sold_rows = []
     for key, name in candidates.items():
         rec = sales.get(key) or {}
         net = rec.get("w", 0)
-        since = zero_events.get(key, (None, None))[1]
-        sold_rows.append(((-net, -_ordinal(rec.get("last")), key), make_row(key, name, net, window, rec.get("last"), since)))
-    sold_rows = _stock_group_rows(sold_rows)
+        sold_rows.append(((-net, -_ordinal(rec.get("last")), key), (key, name, net, window, rec.get("last"), zero_events.get(key, (None, None))[1], _stock_car_of(key, catalogue))))
+    sold_rows = _stock_group_light(sold_rows)
 
     # 2. last piece: one left, and it sells
     last_rows = []
@@ -6632,8 +6626,8 @@ def _stock_needs_compute(conn, settings):
         for key, (name, qty) in state.items():
             rec = sales.get(key)
             if qty == 1 and rec and rec["n180"] >= settings["last_piece_min_sold"]:
-                last_rows.append(((-rec["n180"], -_ordinal(rec["last"]), key), make_row(key, name, rec["n180"], 180, rec["last"], None)))
-    last_rows = _stock_group_rows(last_rows)
+                last_rows.append(((-rec["n180"], -_ordinal(rec["last"]), key), (key, name, rec["n180"], 180, rec["last"], None, _stock_car_of(key, catalogue))))
+    last_rows = _stock_group_light(last_rows)
 
     # 3. cars running thin: few of the designs that are alive (in stock, or sold in the last year) are in stock
     interest = _stock_car_interest(conn, bool(settings["include_admin"]))
@@ -6668,7 +6662,18 @@ def _stock_needs_compute(conn, settings):
     else:
         banner = {"text": "No sales history yet. Stock changes have not been recorded yet.", "calm": False}
     return {"sold": sold_rows, "last": last_rows, "thin": [row for _key, row in thin], "car_items": car_items, "banner": banner,
-            "tracking": tracking, "settings": settings}
+            "tracking": tracking, "settings": settings, "make_row": make_row}
+
+
+def _stock_group_light(pairs):
+    """[(sort_key, entry)] where entry[6] is the car -> the entries car by car: the car with the best design first, and inside a
+    car the best design first."""
+    best = {}
+    for sort_key, entry in pairs:
+        if entry[6] not in best or sort_key < best[entry[6]]:
+            best[entry[6]] = sort_key
+    pairs.sort(key=lambda pair: (best[pair[1][6]], pair[1][6], pair[0]))
+    return [entry for _key, entry in pairs]
 
 
 def _stock_tab_needs(conn, section, q, page, block, car):
@@ -6676,10 +6681,10 @@ def _stock_tab_needs(conn, section, q, page, block, car):
     data = _stock_mgmt_cached(("needs_all", get_data_versions()["data_version"]), lambda: _stock_needs_compute(conn, settings))
     query = _stock_item_key(q)
 
-    def keep_items(rows):
+    def keep_items(entries):
         if not query:
-            return rows
-        return [r for r in rows if query in r["item_key"] or query in _stock_item_key(r["car"])]
+            return entries
+        return [e for e in entries if query in e[0] or query in _stock_item_key(e[6])]
 
     lists = {"sold": keep_items(data["sold"]), "last": keep_items(data["last"]),
              "thin": [r for r in data["thin"] if not query or query in r["car_key"]]}
@@ -6688,6 +6693,9 @@ def _stock_tab_needs(conn, section, q, page, block, car):
     else:
         rows = lists[section]
     payload = _stock_page(rows, page)
+    if block != "car_items" and section in ("sold", "last"):
+        make_row = data["make_row"]
+        payload["rows"] = [make_row(*entry) for entry in payload["rows"]]       # the page's rows only
     payload.update(tab="needs", section=section, block=block, totals={name: len(rows_) for name, rows_ in lists.items()},
                    settings=data["settings"], tracking=data["tracking"], banner=data["banner"])
     return payload

@@ -758,7 +758,8 @@ def _ensure_sales_schema(conn):
         )
         """
     )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_sales_lines_item_day ON sales_lines (item_key, day)")
+    # (item_key, day) plus the two columns the Stock Management queries sum, so they are answered from the index alone
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sales_lines_item_day ON sales_lines (item_key, day, kind, qty)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sales_lines_day ON sales_lines (day)")
 
 
