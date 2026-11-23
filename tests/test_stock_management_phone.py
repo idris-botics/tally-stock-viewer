@@ -148,17 +148,22 @@ class PhoneUi(unittest.TestCase):
             self.shot(page, f"phone-390-dark-{tab}")
             self.assertEqual(self.problems(page), [])
 
-    def test_tab_bar_is_pinned_to_the_bottom_on_a_phone_and_switches_tabs(self):
+    def test_tabs_sit_at_the_top_like_the_rest_of_the_site_and_switch_sections(self):
         page = self.open("phone-390", "needs")
-        box = page.locator("#tabs").bounding_box()
-        self.assertGreaterEqual(box["y"] + box["height"], 844 - 2)       # touches the bottom edge
+        self.assertLess(page.locator("#tabs").bounding_box()["y"], 400)             # near the top, not a bottom bar
         self.assertEqual(page.locator("#tabs button").count(), 4)
+        self.assertIn("Home", page.locator(".topbar").inner_text())                  # the same top bar as Manage Accounts
         page.locator("#tabs button[data-tab=order]").click()
         page.wait_for_selector("#panel .bin")
         self.assertIn("Order list", page.locator("#tabs button[aria-selected=true]").inner_text())
         page.locator("#tabs button[data-tab=ordered]").click()
         page.wait_for_selector("#panel .bin")
         self.assertTrue(page.locator("text=Overdue").count() >= 1)
+
+    def test_it_uses_the_site_font_and_colours(self):
+        page = self.open("phone-390", "needs")
+        self.assertIn("Outfit", page.evaluate("getComputedStyle(document.body).fontFamily"))
+        self.assertEqual(page.evaluate("getComputedStyle(document.querySelector('#tabs button[aria-selected=true]')).backgroundColor"), "rgb(31, 111, 235)")
 
     def test_stepper_add_and_remove_work_by_tapping(self):
         page = self.open("phone-390", "needs")
@@ -168,8 +173,8 @@ class PhoneUi(unittest.TestCase):
         item.locator("button[aria-label='One more']").click()
         self.assertEqual(int(item.locator("input[type=number]").input_value()), before + 1)
         item.locator("button:has-text('Add to order list')").click()
-        page.wait_for_selector("#msg.ok")
-        self.assertIn("✓ On list", item.locator("button.good").inner_text())
+        page.wait_for_selector("#msg.success")
+        self.assertIn("✓ On list", item.locator("button.secondary:has-text(\"On list\")").inner_text())
         item.locator("button:has-text('Remove from list')").click()
         page.wait_for_function("document.querySelector('#msg').textContent.includes('taken off')")
         self.assertTrue(item.locator("button:has-text('Add to order list')").is_visible())

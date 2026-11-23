@@ -4,197 +4,162 @@
     <meta charset="utf-8">
     <title>Stock Management - Super Seatings</title>
     <link rel="icon" type="image/jpeg" href="{{ url_for('static', filename='logo.jpg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='shared.css') }}">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="color-scheme" content="light dark">
     <style>
+        /* Same look as Manage Accounts and the System panel: light page, white rounded panels, blue buttons, small pills. */
         :root {
-            --bg: #f4f6f8;
+            --bg: #f3f6fb;
             --panel: #ffffff;
-            --ink: #101828;
-            --muted: #4b5a6e;
-            --line: #d5dde6;
-            --action: #0b6f78;
-            --action-ink: #ffffff;
-            --action-soft: #dff3f4;
-            --urgent: #c4122f;
-            --urgent-soft: #fde8ec;
-            --soon: #b36b00;
-            --soon-soft: #fff1d1;
-            --fine: #1b7f55;
-            --fine-soft: #def4e9;
-            --shadow: 0 1px 2px rgba(16, 24, 40, .08);
-        }
-        @media (prefers-color-scheme: dark) {
-            :root {
-                --bg: #0d141d;
-                --panel: #16202c;
-                --ink: #eaf0f7;
-                --muted: #a3b3c7;
-                --line: #2a3a4e;
-                --action: #4cc3cc;
-                --action-ink: #06262a;
-                --action-soft: #12383d;
-                --urgent: #ff7d8f;
-                --urgent-soft: #45171f;
-                --soon: #ffc15e;
-                --soon-soft: #3d3014;
-                --fine: #62d49a;
-                --fine-soft: #173a2b;
-                --shadow: none;
-            }
+            --text: #132238;
+            --muted: #5d6b82;
+            --border: #d9e2ec;
+            --success-bg: #e8f5e9;
+            --success-text: #276749;
+            --error-bg: #fdecea;
+            --error-text: #b42318;
+            --warn-bg: #fff7e6;
+            --warn-text: #92400e;
         }
         * { box-sizing: border-box; }
-        html { -webkit-text-size-adjust: 100%; scroll-padding-bottom: 130px; }
-        body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; font-size: 18px; line-height: 1.4; color: var(--ink); background: var(--bg); font-variant-numeric: tabular-nums; }
-        .page { max-width: 820px; margin: 0 auto; padding: 0 14px 130px; }
-        button, input, select, textarea, summary { font: inherit; }
-        :focus-visible { outline: 3px solid var(--action); outline-offset: 2px; }
-
-        /* top bar */
-        .topbar { position: sticky; top: 0; z-index: 25; display: flex; align-items: center; gap: 8px; padding: 10px 0; background: var(--bg); }
-        .topbar h1 { flex: 1 1 auto; margin: 0; font-size: 22px; line-height: 1.15; letter-spacing: -.01em; }
-        .btn, button { min-height: 48px; padding: 8px 16px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel); color: var(--action); font-weight: 700; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px; -webkit-tap-highlight-color: transparent; }
-        button:active { transform: scale(.98); }
-        button.primary { background: var(--action); border-color: var(--action); color: var(--action-ink); }
-        button.good { background: var(--fine-soft); border-color: var(--fine); color: var(--fine); }
-        button.danger { color: var(--urgent); }
-        button.ghost { background: transparent; border-color: transparent; }
-        button:disabled { opacity: .45; cursor: default; transform: none; }
-
-        /* banner and notices */
-        .banner { border-radius: 12px; padding: 10px 14px; margin: 0 0 12px; font-weight: 600; font-size: 16px; background: var(--soon-soft); color: var(--soon); }
-        .banner.calm { background: var(--fine-soft); color: var(--fine); }
-        .note { margin: 0 0 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
-        .note summary { min-height: 48px; display: flex; align-items: center; padding: 0 14px; font-weight: 700; cursor: pointer; }
-        .note p { margin: 0; padding: 0 14px 14px; color: var(--muted); font-size: 16px; }
-        .fineprint { color: var(--muted); font-size: 15px; margin: 18px 2px 0; }
-        .toast { position: fixed; left: 12px; right: 12px; bottom: calc(86px + env(safe-area-inset-bottom)); z-index: 40; max-width: 640px; margin: 0 auto; padding: 12px 16px; border-radius: 14px; font-weight: 700; display: none; box-shadow: 0 6px 24px rgba(16, 24, 40, .28); }
-        .toast.ok { display: block; background: var(--fine); color: #fff; }
-        .toast.err { display: block; background: var(--urgent); color: #fff; }
-        @media (prefers-color-scheme: dark) { .toast.ok, .toast.err { color: #06120c; } }
-
-        /* bottom tab bar (phones) / top pills (wide) */
-        .tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: flex; gap: 4px; padding: 6px 8px calc(6px + env(safe-area-inset-bottom)); background: var(--panel); border-top: 1px solid var(--line); }
-        .tabs button { flex: 1 1 0; min-width: 0; min-height: 58px; padding: 4px 2px; flex-direction: column; gap: 2px; border: 0; border-radius: 12px; background: transparent; color: var(--muted); font-size: 14px; position: relative; }
-        .tabs button[aria-selected=true] { background: var(--action-soft); color: var(--action); }
-        .tabs svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-        .tabs .count { position: absolute; top: 2px; right: calc(50% - 26px); min-width: 20px; padding: 0 5px; border-radius: 999px; font-size: 12px; font-weight: 800; line-height: 20px; background: var(--ink); color: var(--bg); }
-        .tabs .count.hot { background: var(--urgent); color: #fff; }
-        .tabs .count:empty { display: none; }
-        @media (min-width: 760px) {
-            .page { padding-bottom: 40px; }
-            .tabs { position: sticky; top: 64px; bottom: auto; z-index: 24; border: 1px solid var(--line); border-radius: 16px; margin-bottom: 14px; padding: 6px; }
-            .tabs button { flex-direction: row; font-size: 17px; min-height: 48px; }
-            .tabs .count { position: static; }
-            .toast { bottom: 24px; }
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            font-size: 15px;
+            color: var(--text);
+            background:
+                radial-gradient(circle at top left, rgba(31, 111, 235, 0.14), transparent 24%),
+                radial-gradient(circle at top right, rgba(20, 184, 166, 0.12), transparent 20%),
+                var(--bg);
         }
+        .page { max-width: 1000px; margin: 0 auto; padding: 28px 20px 40px; }
+        .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 18px; box-shadow: 0 14px 40px rgba(19, 34, 56, 0.08); margin-bottom: 16px; }
+        .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; position: sticky; top: 8px; z-index: 40; background: rgba(255, 255, 255, 0.92); backdrop-filter: blur(8px); border: 1px solid var(--border); border-radius: 14px; padding: 10px 14px; margin-bottom: 16px; box-shadow: 0 8px 24px rgba(19, 34, 56, 0.08); }
+        .topbar-left, .topbar-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .link-button { padding: 11px 14px; border-radius: 10px; border: 1px solid var(--border); background: #f8fafc; color: var(--accent); font-size: 14px; font-weight: 700; text-decoration: none; display: inline-flex; justify-content: center; align-items: center; cursor: pointer; min-height: 44px; }
+        .link-button:hover { background: #eef2f7; }
+        .role-indicator { display: inline-flex; align-items: center; font-size: 11px; font-weight: 600; color: var(--muted); padding: 0 2px; }
+        h1 { margin: 0 0 6px; font-size: 24px; }
+        .muted { color: var(--muted); font-size: 13px; }
+        label { font-weight: 700; color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; display: block; margin-bottom: 6px; }
+        label.inline { display: inline-flex; align-items: center; gap: 8px; text-transform: none; letter-spacing: 0; font-size: 14px; color: var(--text); margin: 0; }
+        input, button, select { padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); font-size: 14px; font-family: inherit; min-height: 44px; }
+        input, select { background: #fff; color: var(--text); max-width: 100%; }
+        input[type=text].wide { width: 100%; }
+        input[type=checkbox] { width: 24px; height: 24px; min-height: 0; padding: 0; accent-color: var(--accent); flex: 0 0 auto; }
+        button { background: var(--accent); color: #fff; border: 0; cursor: pointer; font-weight: 700; }
+        button.secondary { background: #e8eef7; color: var(--text); }
+        button.btn-delete { background: #dc2626; color: #fff; }
+        button:disabled { opacity: 0.5; cursor: default; }
+        .notice { display: none; padding: 10px 12px; border-radius: 10px; margin-bottom: 14px; font-size: 13px; }
+        #msg { position: sticky; top: 74px; z-index: 30; }
+        .notice.success { display: block; color: var(--success-text); background: var(--success-bg); }
+        .notice.error { display: block; color: var(--error-text); background: var(--error-bg); }
+        .notice.info { display: block; color: var(--warn-text); background: var(--warn-bg); }
 
-        /* summary tiles and segmented control */
-        .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
-        .tile { display: block; text-align: left; min-height: 0; padding: 10px 12px; border-radius: 14px; background: var(--panel); color: var(--ink); border: 1px solid var(--line); box-shadow: var(--shadow); }
-        .tile b { display: block; font-size: 28px; line-height: 1.1; }
-        .tile span { display: block; font-size: 14px; color: var(--muted); font-weight: 600; margin-top: 2px; }
-        .tile.urgent b { color: var(--urgent); }
-        .tile.soon b { color: var(--soon); }
-        .tile[aria-pressed=true] { border-color: var(--action); box-shadow: 0 0 0 2px var(--action); }
-        .tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+        /* section switcher: the same pills as Train Matches' queue tabs */
+        .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+        .tabs button { padding: 8px 16px; border-radius: 999px; border: 1px solid var(--border); background: #fff; font-size: 14px; font-weight: 700; color: var(--muted); white-space: nowrap; display: inline-flex; align-items: center; gap: 8px; }
+        .tabs button[aria-selected=true] { background: var(--accent); border-color: var(--accent); color: #fff; }
+        .tabs .count { min-width: 22px; padding: 0 7px; border-radius: 999px; font-size: 12px; line-height: 20px; background: #e8eef7; color: var(--text); text-align: center; }
+        .tabs button[aria-selected=true] .count { background: rgba(255, 255, 255, 0.25); color: #fff; }
+        .tabs .count.hot { background: #dc2626; color: #fff; }
+        .tabs .count:empty { display: none; }
+
+        /* stat cards: the same as the Usage Charts cards */
+        .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 14px; }
+        .tile { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; background: #f8fafd; color: var(--text); text-align: left; display: block; min-height: 0; font-weight: 400; }
+        .tile b { display: block; font-size: 24px; font-weight: 700; line-height: 1.2; }
+        .tile span { display: block; font-size: 12px; color: var(--muted); }
+        .tile[aria-pressed=true] { border-color: var(--accent); background: #eef4ff; }
+        .tile.urgent b { color: #b91c1c; }
+        .tile.soon b { color: #b45309; }
+        .tools { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
         .search { display: flex; gap: 8px; flex: 1 1 240px; min-width: 0; }
         .search input { flex: 1 1 auto; min-width: 0; }
-        .switch { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; min-height: 48px; }
 
-        /* car bins (groups) */
-        .bin { margin-bottom: 10px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); box-shadow: var(--shadow); overflow: hidden; }
-        .bin > summary { list-style: none; display: flex; align-items: center; gap: 10px; min-height: 64px; padding: 10px 14px; cursor: pointer; }
+        /* one car's items: a header row, then one row per item like the accounts table */
+        .bin { border: 1px solid var(--border); border-radius: 12px; background: #fff; margin-bottom: 10px; overflow: hidden; }
+        .bin > summary { list-style: none; display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer; min-height: 52px; background: #f8fafd; }
         .bin > summary::-webkit-details-marker { display: none; }
-        .bin > summary .caret { flex: 0 0 auto; width: 12px; height: 12px; border-right: 3px solid var(--muted); border-bottom: 3px solid var(--muted); transform: rotate(-45deg); transition: transform .15s; }
+        .bin > summary .caret { flex: 0 0 auto; width: 9px; height: 9px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(-45deg); }
         .bin[open] > summary .caret { transform: rotate(45deg); }
         .bin .car { flex: 1 1 auto; min-width: 0; }
-        .bin .car b { display: block; font-size: 19px; overflow-wrap: anywhere; line-height: 1.2; }
-        .bin .car span { display: block; color: var(--muted); font-size: 15px; margin-top: 2px; }
-        .bin .pill { flex: 0 0 auto; }
-        .bin.urgent { border-left: 6px solid var(--urgent); }
-        .bin.soon { border-left: 6px solid var(--soon); }
-        .bin.fine { border-left: 6px solid var(--fine); }
-        .bin .inner { border-top: 1px solid var(--line); }
-
-        /* item rows */
-        .item { padding: 12px 14px; border-top: 1px solid var(--line); }
-        .item:first-child { border-top: 0; }
-        .item.dim { opacity: .68; }
-        .item .name { font-weight: 800; font-size: 18px; overflow-wrap: anywhere; line-height: 1.25; }
-        .gauge { height: 10px; border-radius: 999px; background: var(--line); margin: 10px 0 6px; overflow: hidden; }
-        .gauge i { display: block; height: 100%; border-radius: 999px; background: var(--fine); }
-        .gauge.urgent i { background: var(--urgent); }
-        .gauge.soon i { background: var(--soon); }
+        .bin .car b { display: block; font-size: 15px; overflow-wrap: anywhere; }
+        .bin .car span { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+        .item { padding: 12px 14px; border-top: 1px solid var(--border); }
+        .item.dim { opacity: 0.7; }
+        .item .name { font-weight: 700; font-size: 15px; overflow-wrap: anywhere; }
         .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-        .chip { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 999px; font-size: 15px; font-weight: 700; background: var(--action-soft); color: var(--action); }
-        .chip.bad { background: var(--urgent-soft); color: var(--urgent); }
-        .chip.warn { background: var(--soon-soft); color: var(--soon); }
-        .chip.good { background: var(--fine-soft); color: var(--fine); }
-        .chip.plain { background: var(--line); color: var(--ink); }
-        .pill { display: inline-flex; align-items: center; justify-content: center; min-width: 32px; height: 32px; padding: 0 10px; border-radius: 999px; font-weight: 800; font-size: 16px; background: var(--line); color: var(--ink); }
-        .pill.bad { background: var(--urgent); color: #fff; }
-        .pill.warn { background: var(--soon); color: #fff; }
-        @media (prefers-color-scheme: dark) { .pill.bad, .pill.warn { color: #190a0d; } }
-        .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 10px; }
+        .chip { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; background: #eef4ff; color: var(--accent-dark); }
+        .chip.good { color: var(--success-text); background: var(--success-bg); }
+        .chip.bad { color: var(--error-text); background: var(--error-bg); }
+        .chip.warn { color: var(--warn-text); background: var(--warn-bg); }
+        .chip.plain { color: #6b7280; background: #f3f4f6; }
+        .pill { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; color: #6b7280; background: #f3f4f6; flex: 0 0 auto; }
+        .pill.bad { color: var(--error-text); background: var(--error-bg); }
+        .pill.warn { color: var(--warn-text); background: var(--warn-bg); }
+        .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
         .actions .grow { flex: 1 1 auto; }
-        .meta { color: var(--muted); font-size: 16px; margin-top: 4px; }
-        .empty { text-align: center; color: var(--muted); padding: 30px 14px; background: var(--panel); border: 1px dashed var(--line); border-radius: 16px; }
-        .empty strong { display: block; color: var(--ink); font-size: 19px; margin-bottom: 4px; }
-        .loading { color: var(--muted); padding: 28px 0; text-align: center; }
-        .heading { margin: 20px 0 8px; font-size: 19px; font-weight: 800; }
-        .heading small { color: var(--muted); font-size: 15px; font-weight: 600; margin-left: 6px; }
-
-        /* inputs */
-        input[type=number], input[type=text], input[type=date], select { min-height: 48px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink); max-width: 100%; }
-        input[type=text].wide { width: 100%; }
-        input[type=checkbox] { width: 28px; height: 28px; accent-color: var(--action); flex: 0 0 auto; }
-        .stepper { display: inline-flex; align-items: stretch; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--panel); }
-        .stepper button { min-height: 48px; width: 48px; padding: 0; border: 0; border-radius: 0; font-size: 24px; background: var(--action-soft); color: var(--action); }
-        .stepper input { width: 4.4em; border: 0; border-radius: 0; text-align: center; font-weight: 800; -moz-appearance: textfield; }
+        .stepper { display: inline-flex; align-items: stretch; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: #fff; }
+        .stepper button { width: 44px; padding: 0; border: 0; border-radius: 0; font-size: 20px; background: #e8eef7; color: var(--text); }
+        .stepper input { width: 4.2em; border: 0; border-radius: 0; text-align: center; font-weight: 700; -moz-appearance: textfield; }
         .stepper input::-webkit-outer-spin-button, .stepper input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-        details.settings { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 4px 14px; margin-top: 18px; }
-        details.settings summary { min-height: 48px; display: flex; align-items: center; font-weight: 800; cursor: pointer; }
-        details.settings .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; padding: 4px 0 12px; }
-        details.settings label { display: flex; flex-direction: column; gap: 4px; font-weight: 700; font-size: 16px; color: var(--muted); }
-        .bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 12px; margin-bottom: 12px; box-shadow: var(--shadow); }
+        .bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
         .bar .grow { flex: 1 1 auto; }
-        textarea.copybox { width: 100%; min-height: 160px; font-size: 16px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); padding: 10px; }
-        .jump { position: fixed; right: 14px; bottom: calc(84px + env(safe-area-inset-bottom)); z-index: 35; min-height: 52px; border-radius: 999px; background: var(--action); border-color: var(--action); color: var(--action-ink); box-shadow: 0 6px 20px rgba(16, 24, 40, .3); display: none; }
-        .jump.show { display: inline-flex; }
-        @media (min-width: 760px) { .jump { bottom: 24px; } }
+        .meta { color: var(--muted); font-size: 13px; margin-top: 4px; }
+        .empty { text-align: center; color: var(--muted); padding: 26px 14px; border: 1px dashed var(--border); border-radius: 12px; font-size: 14px; }
+        .empty strong { display: block; color: var(--text); font-size: 16px; margin-bottom: 4px; }
+        .loading { color: var(--muted); padding: 24px 0; text-align: center; }
+        .heading { margin: 18px 0 8px; font-size: 16px; font-weight: 700; }
+        .heading small { color: var(--muted); font-size: 13px; font-weight: 600; margin-left: 6px; }
+        details.note { border: 1px solid var(--border); border-radius: 12px; background: #f8fafd; margin-bottom: 14px; }
+        details.note summary { min-height: 44px; display: flex; align-items: center; padding: 0 14px; font-weight: 700; font-size: 14px; cursor: pointer; }
+        details.note p { margin: 0; padding: 0 14px 12px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+        .fineprint { color: var(--muted); font-size: 12px; margin: 14px 2px 0; line-height: 1.5; }
+        details.settings { border: 1px solid var(--border); border-radius: 12px; padding: 2px 14px; margin-top: 14px; background: #fff; }
+        details.settings summary { min-height: 44px; display: flex; align-items: center; font-weight: 700; cursor: pointer; }
+        details.settings .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; padding: 4px 0 12px; }
+        textarea.copybox { width: 100%; min-height: 150px; font-size: 14px; border-radius: 10px; border: 1px solid var(--border); padding: 10px; }
         #printSheet { display: none; }
+        @media (max-width: 640px) {
+            .page { padding: 12px 12px 32px; }
+            .topbar { position: sticky; top: 0; margin: -12px -12px 12px; border-radius: 0; border-left: 0; border-right: 0; }
+            .panel { padding: 14px; }
+            .tabs button { flex: 1 1 calc(50% - 8px); justify-content: center; }
+            #msg { top: 62px; }
+        }
         @media print { .no-print { display: none !important; } #printSheet { display: block !important; color: #000; background: #fff; font-size: 14pt; white-space: pre-wrap; } body { background: #fff; } }
-        @media (prefers-reduced-motion: reduce) { button:active { transform: none; } .bin > summary .caret { transition: none; } }
     </style>
 </head>
 <body>
 <div class="page">
     <div class="topbar no-print">
-        <a class="btn" href="/" title="Go back to the stock page" aria-label="Back to the stock page">&larr; Back</a>
-        <h1>Stock Management</h1>
-        <button type="button" id="refreshBtn" title="Reload the latest numbers from the shop's stock updates" aria-label="Refresh">&#8635; Refresh</button>
+        <div class="topbar-left">
+            <a href="/" class="link-button" title="Return to the main stock viewer page">Home</a>
+            <a href="/train" class="link-button" title="Go to the training mode stock matching page">Train Matches</a>
+            <button type="button" id="refreshBtn" class="secondary" title="Reload the latest numbers from the shop's stock updates" aria-label="Refresh">Refresh</button>
+        </div>
+        <div class="topbar-right">
+            <span class="role-indicator">Admin mode</span>
+            <a href="/logout" class="link-button" title="Sign out of your account">Logout</a>
+        </div>
     </div>
-    <div id="banner" class="banner no-print" role="status"></div>
-    <div id="panel" class="no-print"></div>
+    <div class="panel no-print">
+        <h1>Stock management</h1>
+        <p class="muted" style="margin:0;">See what needs restocking, build an order list, and follow your orders. Works from the stock changes this site has recorded.</p>
+    </div>
+    <div id="msg" class="notice no-print" role="status" aria-live="polite"></div>
+    <div class="tabs no-print" role="tablist" id="tabs" aria-label="Stock Management sections">
+        <button type="button" role="tab" data-tab="needs" title="Needs restocking: items that are running low or sold out, grouped by car">Needs restocking <span class="count" data-count="needs"></span></button>
+        <button type="button" role="tab" data-tab="order" title="Order list: what you plan to buy. Copy it to WhatsApp, print it or mark it as ordered">Order list <span class="count" data-count="order"></span></button>
+        <button type="button" role="tab" data-tab="ordered" title="Ordered: orders you have placed, with expected dates and overdue warnings">Ordered <span class="count" data-count="ordered"></span></button>
+        <button type="button" role="tab" data-tab="slow" title="Slow stock: items in stock that have not sold for a long time">Slow stock <span class="count" data-count="slow"></span></button>
+    </div>
+    <div id="banner" class="notice info no-print" role="status"></div>
+    <div class="panel no-print"><div id="panel"></div></div>
     <div id="printSheet"></div>
 </div>
-<div id="msg" class="toast no-print" role="status" aria-live="polite"></div>
-<button type="button" id="jumpBtn" class="jump no-print" title="Go to the order list you are building">Order list</button>
-<nav class="tabs no-print" role="tablist" id="tabs" aria-label="Stock Management sections">
-    <button type="button" role="tab" data-tab="needs" title="Needs restocking: items that are running low or sold out, grouped by car">
-        <span class="count" data-count="needs"></span>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4"/><path d="M3 17l9 4 9-4"/></svg>Restock</button>
-    <button type="button" role="tab" data-tab="order" title="Order list: what you plan to buy. Copy it to WhatsApp, print it or mark it as ordered">
-        <span class="count" data-count="order"></span>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4h6a1 1 0 0 1 1 1v1H8V5a1 1 0 0 1 1-1z"/><path d="M8 6H6a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V7a1 1 0 0 0-1-1h-2"/><path d="M9 12h6M9 16h6"/></svg>Order list</button>
-    <button type="button" role="tab" data-tab="ordered" title="Ordered: orders you have placed, with expected dates and overdue warnings">
-        <span class="count" data-count="ordered"></span>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h11v9H3z"/><path d="M14 10h4l3 3v3h-7z"/><circle cx="7" cy="18" r="1.7"/><circle cx="17" cy="18" r="1.7"/></svg>Ordered</button>
-    <button type="button" role="tab" data-tab="slow" title="Slow stock: items in stock that have not sold for a long time">
-        <span class="count" data-count="slow"></span>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 3h6"/></svg>Slow stock</button>
-</nav>
 <script>
 (function () {
     "use strict";
@@ -205,7 +170,6 @@
     var panel = document.getElementById("panel");
     var banner = document.getElementById("banner");
     var toast = document.getElementById("msg");
-    var jump = document.getElementById("jumpBtn");
     var loadCount = 0;
     var orderCount = 0;
 
@@ -222,8 +186,8 @@
         (kids || []).forEach(function (kid) { if (kid) { node.appendChild(typeof kid === "string" ? document.createTextNode(kid) : kid); } });
         return node;
     }
-    function say(text, bad) { toast.textContent = text; toast.className = "toast no-print " + (bad ? "err" : "ok"); }
-    function quiet() { toast.className = "toast no-print"; toast.textContent = ""; }
+    function say(text, bad) { toast.textContent = text; toast.className = "notice no-print " + (bad ? "error" : "success"); }
+    function quiet() { toast.className = "notice no-print"; toast.textContent = ""; }
     function qs(params) {
         return Object.keys(params).filter(function (k) { return params[k] !== "" && params[k] !== null && params[k] !== undefined; })
             .map(function (k) { return encodeURIComponent(k) + "=" + encodeURIComponent(params[k]); }).join("&");
@@ -251,7 +215,8 @@
     function chip(text, kind, hint) { return el("span", { class: "chip" + (kind ? " " + kind : ""), text: text, title: hint || text }); }
     function setBanner(tracking) {
         banner.textContent = tracking.banner || "";
-        banner.className = "banner no-print" + (tracking.stock_days >= 7 ? " calm" : "");
+        banner.className = "notice no-print " + (tracking.stock_days >= 7 ? "success" : "info");
+        banner.style.position = "static";
         banner.title = "How long the site has been recording stock changes. Estimates are only as good as this history.";
     }
     function setCount(tab, value, hot) {
@@ -268,8 +233,6 @@
             setCount("order", orderCount, false);
             var late = parts[2].open.filter(function (o) { return o.overdue; }).length;
             setCount("ordered", parts[2].total, late > 0);
-            jump.className = "jump no-print" + (orderCount > 0 && current === "needs" ? " show" : "");
-            jump.textContent = "Order list (" + orderCount + ")";
         } catch (error) { /* the counts are only a convenience */ }
     }
     function note(title, text) { return el("details", { class: "note", title: "Tap to read how this page works" }, [el("summary", { text: title }), el("p", { text: text })]); }
@@ -280,7 +243,7 @@
     function searchBox(value, onSearch, placeholder, hint) {
         var input = el("input", { type: "text", value: value, placeholder: placeholder || "Search by name", maxlength: "80", "aria-label": "Search", enterkeyhint: "search", title: hint || "Type part of a name, then press Search" });
         input.addEventListener("keydown", function (event) { if (event.key === "Enter") { onSearch(input.value.trim()); } });
-        return el("div", { class: "search" }, [input, el("button", { type: "button", text: "Search", title: "Search the list", onclick: function () { onSearch(input.value.trim()); } })]);
+        return el("div", { class: "search" }, [input, el("button", { type: "button", class: "secondary", text: "Search", title: "Search the list", onclick: function () { onSearch(input.value.trim()); } })]);
     }
     function stepper(initial, label, hint) {
         var input = el("input", { type: "number", min: "1", max: "100000", step: "1", inputmode: "numeric", value: String(initial), "aria-label": label || "Quantity", title: hint || "How many to order" });
@@ -291,16 +254,16 @@
     }
     function itemActions(row) {
         var qty = stepper(row.suggested_qty, "Quantity to order", "Suggested from recent sales: enough for the 'order cover' days in Settings. Change it if you like.");
-        var primary = el("button", { type: "button", class: row.on_order_list ? "good" : "primary", text: row.on_order_list ? "✓ On list - update" : "Add to order list",
+        var primary = el("button", { type: "button", class: row.on_order_list ? "secondary" : "", text: row.on_order_list ? "✓ On list - update" : "Add to order list",
             title: row.on_order_list ? "Already on your order list. Tap to save a changed quantity." : "Put this item on your order list with this quantity" });
-        var remove = el("button", { type: "button", class: "danger", text: "Remove from list", title: "Take this item off your order list", style: row.on_order_list ? "" : "display:none" });
+        var remove = el("button", { type: "button", class: "btn-delete", text: "Remove from list", title: "Take this item off your order list", style: row.on_order_list ? "" : "display:none" });
         primary.addEventListener("click", async function () {
             primary.disabled = true;
             var result = await send("/draft", { action: "add", item_name: row.item_name, qty: parseInt(qty.input.value, 10) });
             primary.disabled = false;
             if (result.ok) {
                 say(row.item_name + " is on the order list.");
-                primary.textContent = "✓ On list - update"; primary.className = "good"; remove.style.display = "";
+                primary.textContent = "✓ On list - update"; primary.className = "secondary"; remove.style.display = "";
                 primary.title = "Already on your order list. Tap to save a changed quantity.";
                 refreshCounts();
             } else { say(result.data.error || "Could not add.", true); }
@@ -311,7 +274,7 @@
             remove.disabled = false;
             if (result.ok) {
                 say(row.item_name + " was taken off the order list.");
-                primary.textContent = "Add to order list"; primary.className = "primary"; remove.style.display = "none";
+                primary.textContent = "Add to order list"; primary.className = ""; remove.style.display = "none";
                 primary.title = "Put this item on your order list with this quantity";
                 refreshCounts();
             } else { say(result.data.error || "Could not remove.", true); }
@@ -339,7 +302,6 @@
         chips.push(orderChip(row.open_order));
         return el("div", { class: "item" + (row.open_order ? " dim" : "") }, [
             el("div", { class: "name", text: row.item_name }),
-            el("div", { class: "gauge " + g.kind, title: "How much time is left before it runs out. Fuller is safer.", role: "img", "aria-label": "Stock gauge" }, [el("i", { style: "width:" + g.pct + "%" })]),
             el("div", { class: "chips" }, chips), itemActions(row)]);
     }
     function outRow(row) {
@@ -362,8 +324,7 @@
         group.rows.forEach(function (r) { if (r.days_left !== null && (soonest === null || r.days_left < soonest)) { soonest = r.days_left; } });
         var line = view === "out" ? group.rows.length + (group.rows.length === 1 ? " item sold out" : " items sold out")
             : group.rows.length + (group.rows.length === 1 ? " item" : " items") + (soonest !== null ? ", first gone in about " + soonest + (soonest === 1 ? " day" : " days") : "");
-        var kind = urgentCount ? "urgent" : "soon";
-        var details = el("details", { class: "bin " + kind, title: "Tap to show or hide the items for this car" }, [
+        var details = el("details", { class: "bin", title: "Tap to show or hide the items for this car" }, [
             el("summary", {}, [el("span", { class: "caret" }), el("div", { class: "car" }, [el("b", { text: group.car }), el("span", { text: line })]),
                 el("span", { class: "pill " + (urgentCount ? "bad" : "warn"), text: String(group.rows.length), title: group.rows.length + " items for this car" })]),
             el("div", { class: "inner" }, group.rows.map(function (row) { return view === "out" ? outRow(row) : lowRow(row, lowDays); }))]);
@@ -406,11 +367,11 @@
             var toggle = el("input", { type: "checkbox", title: "Off: only items that sold before or belong to cars dealers opened. On: every catalogue item that is at zero." });
             toggle.checked = s.showAll;
             toggle.addEventListener("change", function () { s.showAll = toggle.checked; s.outPages = 1; load(); });
-            toolsChildren.push(el("label", { class: "switch", title: toggle.title }, [toggle, "Whole catalogue"]));
+            toolsChildren.push(el("label", { class: "inline", title: toggle.title }, [toggle, "Whole catalogue"]));
         }
         var groups = groupsOf(data.rows);
-        toolsChildren.push(el("button", { type: "button", text: "Open all", title: "Open every car", onclick: function () { ui.allOpen = true; load(); } }),
-                           el("button", { type: "button", text: "Close all", title: "Close every car", onclick: function () { ui.allOpen = false; load(); } }));
+        toolsChildren.push(el("button", { type: "button", class: "secondary", text: "Open all", title: "Open every car", onclick: function () { ui.allOpen = true; load(); } }),
+                           el("button", { type: "button", class: "secondary", text: "Close all", title: "Close every car", onclick: function () { ui.allOpen = false; load(); } }));
         var list = el("div", {});
         if (!groups.length) {
             list.appendChild(s.view === "low" ? emptyState(s.q ? "No match" : "Nothing is running low", s.q ? "Try a shorter search." : "Every item has enough stock for now.")
@@ -426,7 +387,7 @@
             numberField("low_days", "Running low when days left is at most", 1, 365, "An item shows as running low when its estimated days left is this many or fewer (needs about a week of history)."),
             numberField("low_qty", "Or when quantity is at most", 0, 1000, "An item also shows as running low when the quantity in stock is this number or less."),
             numberField("order_cover_days", "Order enough to last (days)", 1, 365, "The suggested order quantity covers this many days of sales.")]),
-            el("div", { class: "actions", style: "margin:0 0 12px" }, [el("button", { type: "button", class: "primary", text: "Save settings", title: "Save these three numbers on the site", onclick: async function () {
+            el("div", { class: "actions", style: "margin:0 0 12px" }, [el("button", { type: "button", class: "", text: "Save settings", title: "Save these three numbers on the site", onclick: async function () {
                 var body = {};
                 Object.keys(fields).forEach(function (k) { body[k] = parseInt(fields[k].value, 10); });
                 var result = await send("/settings", body);
@@ -437,7 +398,6 @@
             tiles, el("div", { class: "tools" }, toolsChildren), list, more,
             settingsBox,
             el("p", { class: "fineprint", text: "Estimates only. Days left and selling speed come from the stock changes this site has seen since tracking began. They cannot know about seasons, big one-off orders, price changes, or items sold without a stock update. Always check before you order." })].filter(Boolean));
-        jump.className = "jump no-print" + (orderCount > 0 ? " show" : "");
     }
 
     // ---------------- order list
@@ -482,22 +442,22 @@
         var parts = [note("About the order list", "This is your own working list. Edit the quantities and notes, copy it as text to send on WhatsApp, or print it. Nothing is sent to a supplier by this page. Marking items as ordered moves them to the Ordered tab so you can follow up.")];
         parts.push(el("div", { class: "bar" }, [
             el("div", { class: "grow" }, [el("strong", { text: data.total_items + (data.total_items === 1 ? " item" : " items") + " to order" })]),
-            el("button", { type: "button", text: "Copy as text", disabled: !data.total_items, title: "Copy the whole list as plain text, ready to paste into WhatsApp", onclick: function () { copyText(data.text); } }),
-            el("button", { type: "button", text: "Print", disabled: !data.total_items, title: "Print the list on one clean page", onclick: function () { window.print(); } }),
-            el("button", { type: "button", class: "ghost", text: "Undo", disabled: !data.can_undo, title: "Undo your last order action (placing, receiving, cancelling or changing a date)", onclick: undo })]));
+            el("button", { type: "button", class: "secondary", text: "Copy as text", disabled: !data.total_items, title: "Copy the whole list as plain text, ready to paste into WhatsApp", onclick: function () { copyText(data.text); } }),
+            el("button", { type: "button", class: "secondary", text: "Print", disabled: !data.total_items, title: "Print the list on one clean page", onclick: function () { window.print(); } }),
+            el("button", { type: "button", class: "secondary", text: "Undo", disabled: !data.can_undo, title: "Undo your last order action (placing, receiving, cancelling or changing a date)", onclick: undo })]));
         if (!data.total_items) {
             parts.push(emptyState("Your order list is empty", "Add items from the Restock tab."));
         } else {
-            parts.push(el("div", { class: "bar" }, [el("label", { class: "meta", title: expected.title }, ["Expected date (optional) ", expected]),
+            parts.push(el("div", { class: "bar" }, [el("label", { class: "inline", title: expected.title }, ["Expected date (optional) ", expected]),
                 el("div", { class: "grow" }),
-                el("button", { type: "button", text: "Mark ticked as ordered", title: "Move only the items you ticked to the Ordered tab", onclick: function () {
+                el("button", { type: "button", class: "secondary", text: "Mark ticked as ordered", title: "Move only the items you ticked to the Ordered tab", onclick: function () {
                     var keys = Object.keys(ticks).filter(function (k) { return ticks[k].checked; });
                     if (!keys.length) { say("Tick the items first.", true); return; }
                     placeOrders({ item_keys: keys, expected_date: expected.value || null }); } }),
-                el("button", { type: "button", class: "primary", text: "Mark all as ordered", title: "Move every item on this list to the Ordered tab", onclick: function () { placeOrders({ all: true, expected_date: expected.value || null }); } })]));
+                el("button", { type: "button", class: "", text: "Mark all as ordered", title: "Move every item on this list to the Ordered tab", onclick: function () { placeOrders({ all: true, expected_date: expected.value || null }); } })]));
         }
         data.groups.forEach(function (group) {
-            var box = el("div", { class: "bin fine", style: "border-left-width:6px" }, [el("div", { class: "car", style: "padding:12px 14px 4px" }, [el("b", { text: group.name }), el("span", { text: group.items.length + (group.items.length === 1 ? " item" : " items") })])]);
+            var box = el("div", { class: "bin" }, [el("div", { class: "car", style: "padding:10px 14px;background:#f8fafd" }, [el("b", { text: group.name }), el("span", { text: group.items.length + (group.items.length === 1 ? " item" : " items") })])]);
             group.items.forEach(function (item) {
                 var tick = el("input", { type: "checkbox", "aria-label": "Tick " + item.item_name, title: "Tick to include this item in 'Mark ticked as ordered'" });
                 ticks[item.item_key] = tick;
@@ -514,7 +474,7 @@
                 box.appendChild(el("div", { class: "item" }, [
                     el("div", { style: "display:flex;gap:12px;align-items:flex-start" }, [tick, el("div", { class: "name", text: item.item_name })]),
                     item.has_open_order ? el("div", { class: "chips" }, [chip("already has an open order", "warn", "An earlier order for this item has not arrived yet")]) : null,
-                    el("div", { class: "actions" }, [qty.box, el("div", { class: "grow" }), el("button", { type: "button", class: "danger", text: "Remove", title: "Take this item off the order list", onclick: async function () {
+                    el("div", { class: "actions" }, [qty.box, el("div", { class: "grow" }), el("button", { type: "button", class: "btn-delete", text: "Remove", title: "Take this item off the order list", onclick: async function () {
                         var result = await send("/draft", { action: "remove", item_key: item.item_key });
                         if (result.ok) { load(); } else { say(result.data.error || "Could not remove.", true); }
                     } })]),
@@ -531,7 +491,7 @@
         setBanner(data.tracking);
         var parts = [note("About orders", "This is a reminder list, not accounting. When the stock of an ordered item goes up, its order is marked received by itself, using the actual increase. Change the expected date or cancel an order any time; Undo takes back your last action."),
             el("div", { class: "bar" }, [el("div", { class: "grow" }, [el("strong", { text: data.total + (data.total === 1 ? " open order" : " open orders") })]),
-                el("button", { type: "button", class: "ghost", text: "Undo", disabled: !data.can_undo, title: "Undo your last order action", onclick: undo })])];
+                el("button", { type: "button", class: "secondary", text: "Undo", disabled: !data.can_undo, title: "Undo your last order action", onclick: undo })])];
         if (!data.open.length) { parts.push(emptyState("No open orders", "Orders you mark as ordered will appear here.")); }
         data.open.forEach(function (order) {
             var date = el("input", { type: "date", min: "2020-01-01", value: order.expected_date || "", "aria-label": "Expected date", title: "When you expect this to arrive" });
@@ -543,16 +503,16 @@
             var age = order.age_days === 0 ? "today" : order.age_days + (order.age_days === 1 ? " day ago" : " days ago");
             var chips = [chip("ordered " + age, "plain", "Placed on " + when(order.ordered_on)), order.expected_date ? chip("expected " + when(order.expected_date), order.overdue ? "bad" : "plain", "Expected arrival date") : null,
                 order.overdue ? chip("Overdue", "bad", "The expected date has passed") : null];
-            parts.push(el("div", { class: "bin " + (order.overdue ? "urgent" : "fine") }, [el("div", { class: "item" }, [
+            parts.push(el("div", { class: "bin" }, [el("div", { class: "item" }, [
                 el("div", { class: "name", text: order.item_name + " × " + order.qty_ordered }),
                 el("div", { class: "chips" }, chips),
                 order.note ? el("div", { class: "meta", text: order.note }) : null,
-                el("div", { class: "actions" }, [received.box, el("button", { type: "button", class: "primary", text: "Mark received", title: "Record that this arrived, with the quantity shown", onclick: function () {
+                el("div", { class: "actions" }, [received.box, el("button", { type: "button", class: "", text: "Mark received", title: "Record that this arrived, with the quantity shown", onclick: function () {
                     act({ action: "receive", id: order.id, qty_received: parseInt(received.input.value, 10) }, "Marked as received."); } })]),
-                el("div", { class: "actions" }, [date, el("button", { type: "button", text: "Save date", title: "Save the expected date", onclick: function () {
+                el("div", { class: "actions" }, [date, el("button", { type: "button", class: "secondary", text: "Save date", title: "Save the expected date", onclick: function () {
                     act({ action: "expected", id: order.id, expected_date: date.value || null }, "Date saved."); } }),
                     el("div", { class: "grow" }),
-                    el("button", { type: "button", class: "danger", text: "Cancel order", title: "Cancel this order (you can undo it right after)", onclick: function () {
+                    el("button", { type: "button", class: "btn-delete", text: "Cancel order", title: "Cancel this order (you can undo it right after)", onclick: function () {
                         if (window.confirm("Cancel the order for " + order.item_name + "?")) { act({ action: "cancel", id: order.id }, "Order cancelled."); } } })])])]));
         });
         var more = moreButton(data, function () { ui.ordered.page += 1; load(); });
@@ -560,7 +520,7 @@
         parts.push(el("div", { class: "heading" }, ["Received in the last 30 days"]));
         if (!data.recent.length) { parts.push(el("div", { class: "meta", text: "Nothing received yet." })); }
         data.recent.forEach(function (order) {
-            parts.push(el("div", { class: "bin fine" }, [el("div", { class: "item" }, [el("div", { class: "name", text: order.item_name }),
+            parts.push(el("div", { class: "bin" }, [el("div", { class: "item" }, [el("div", { class: "name", text: order.item_name }),
                 el("div", { class: "meta", text: "Received " + when(order.received_on) + ": " + order.qty_received + " (ordered " + order.qty_ordered + ")" })])]));
         });
         panel.replaceChildren.apply(panel, parts);
@@ -575,7 +535,7 @@
         select.value = String(s.days);
         select.addEventListener("change", function () { s.days = parseInt(select.value, 10); s.page = 1; load(); });
         var parts = [note("About slow stock", "Slow stock is in stock now, but its quantity has not gone down for the chosen number of days. A restock does not count as a sale. The list only appears once the site has watched stock for at least that long, because a shorter history would be misleading."),
-            el("div", { class: "bar" }, [el("label", { class: "meta" }, ["Nothing sold for at least ", select])])];
+            el("div", { class: "bar" }, [el("label", { class: "inline" }, ["Nothing sold for at least ", select])])];
         if (data.insufficient_history) {
             parts.push(emptyState("Not enough history yet", data.message));
         } else {
@@ -583,7 +543,7 @@
             parts.push(el("div", { class: "heading" }, ["Slow items", el("small", { text: String(data.total) })]));
             if (!data.rows.length) { parts.push(emptyState("No slow items", "Everything in stock has sold recently.")); }
             data.rows.forEach(function (row) {
-                parts.push(el("div", { class: "bin soon" }, [el("div", { class: "item" }, [el("div", { class: "name", text: row.item_name }),
+                parts.push(el("div", { class: "bin" }, [el("div", { class: "item" }, [el("div", { class: "name", text: row.item_name }),
                     el("div", { class: "chips" }, [chip(row.qty + " in stock", "plain", "Quantity in stock now"), chip("sitting " + row.days_sitting + " days", "warn", "Days since the quantity last went down, or since it came into stock"),
                         chip(row.last_decrease ? "last sold " + when(row.last_decrease) : "no sale since tracking began", "plain", "Date the quantity last went down")])])]));
             });
@@ -612,7 +572,6 @@
             button.setAttribute("aria-selected", button.getAttribute("data-tab") === tab ? "true" : "false");
         });
         try { window.location.hash = tab; } catch (error) { /* ignore */ }
-        jump.className = "jump no-print";
         panel.replaceChildren();
         window.scrollTo(0, 0);
         load();
@@ -620,7 +579,6 @@
     Array.prototype.forEach.call(document.querySelectorAll("#tabs button"), function (button) {
         button.addEventListener("click", function () { select(button.getAttribute("data-tab")); });
     });
-    jump.addEventListener("click", function () { select("order"); });
     document.getElementById("refreshBtn").addEventListener("click", function () { load(); });
     document.addEventListener("visibilitychange", function () { if (!document.hidden) { load(); } });
     var start = (window.location.hash || "").replace("#", "");
