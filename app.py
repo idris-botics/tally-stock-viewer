@@ -5926,6 +5926,82 @@ def _persist_feeder_last_seen(moment):
 FEEDER_LAST_SEEN_AT = _load_feeder_last_seen()
 
 
+def _validate_intake_payload(payload):
+    """Checks a pushed payload and returns (clean, error). `clean` holds the three lists with every quantity a
+    plain int (Tally data passes through JSON, so 3.0 is accepted as 3); `error` is a short sentence that names
+    the list and row and never contains a path or exception text. Exactly one of the two is None."""
+    def whole_number(value):
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        return None
+
+    car_master = payload.get("car_master")
+    if not isinstance(car_master, list) or not car_master:
+        return None, "car_master is empty or not a list"
+    seen = set()
+    for index, name in enumerate(car_master):
+        if not isinstance(name, str) or not name.strip():
+            return None, f"car_master row {index}: car name must be a non-empty string"
+        key = re.sub(r"\s+", " ", name).strip().upper()
+        if key in seen:
+            return None, f"car_master row {index}: duplicate car name"
+        seen.add(key)
+
+    main_hierarchy = payload.get("main_hierarchy")
+    if not isinstance(main_hierarchy, list) or not main_hierarchy:
+        return None, "main_hierarchy is empty or not a list"
+    clean_hierarchy = []
+    for index, row in enumerate(main_hierarchy):
+        if not isinstance(row, dict) or not isinstance(row.get("item_name"), str):
+            return None, f"main_hierarchy row {index}: item_name must be a string"
+        clean_row = dict(row)
+        if "qty" in row and row["qty"] != "":
+            qty = whole_number(row["qty"])
+            if qty is None or qty < 0:
+                return None, f"main_hierarchy row {index}: qty must be a whole number >= 0"
+            clean_row["qty"] = qty
+        clean_hierarchy.append(clean_row)
+
+    item_stock = payload.get("item_stock")
+    if not isinstance(item_stock, list) or not item_stock:
+        return None, "item_stock is empty or not a list"
+    clean_stock = []
+    for index, row in enumerate(item_stock):
+        if not isinstance(row, dict) or not isinstance(row.get("item_name"), str) or not row["item_name"].strip():
+            return None, f"item_stock row {index}: item_name must be a non-empty string"
+        qty = whole_number(row.get("qty"))
+        if qty is None or qty < 0:
+            return None, f"item_stock row {index}: qty must be a whole number >= 0"
+        clean_row = dict(row)
+        clean_row["qty"] = qty
+        clean_stock.append(clean_row)
+
+    return {"car_master": list(car_master), "main_hierarchy": clean_hierarchy, "item_stock": clean_stock}, None
+
+
+def _intake_plausibility_error(clean, force=False):
+    """A message when `clean` would cut the cars or the stock rows served now by more than
+    Config.INTAKE_MAX_DROP_PERCENT, else None. Skipped for X-Intake-Force, for the first ever push (no cache
+    files yet) and for a count below 20 (too small for a percentage to mean anything)."""
+    if force or not (os.path.isfile(CAR_MASTER_CACHE_JSON) or os.path.isfile(ITEM_STOCK_CACHE_JSON)):
+        return None
+    try:
+        with open(ITEM_STOCK_CACHE_JSON, "r", encoding="utf-8") as handle:
+            current_stock = len(json.load(handle))
+    except Exception:
+        current_stock = 0
+    limit = Config.INTAKE_MAX_DROP_PERCENT
+    for label, current, new in (("cars", len(CAR_GROUPS), len(clean["car_master"])),
+                                ("stock rows", current_stock, len(clean["item_stock"]))):
+        if current >= 20 and (current - new) * 100 > current * limit:
+            return f"{label} would fall from {current} to {new} (more than {limit}% fewer); push refused"
+    return None
+
+
 @app.route("/admin/intake/sync_data", methods=["POST"])
 def intake_sync_data():
     expected_token = Config.INTAKE_SYNC_TOKEN
@@ -5954,6 +6030,15 @@ def intake_sync_data():
         isinstance(row, dict) and "item_name" in row and "qty" in row for row in item_stock
     ):
         return jsonify({"error": "item_stock must be a list of objects each containing 'item_name' and 'qty'."}), 400
+
+    clean, error = _validate_intake_payload(payload)
+    if error is None:
+        error = _intake_plausibility_error(clean, force=request.headers.get("X-Intake-Force") == "1")
+    if error is not None:
+        logger.warning("Cloud intake: push refused (%s); pushed %d cars, %d hierarchy rows, %d stock rows; serving %d cars",
+                       error, len(car_master), len(main_hierarchy), len(item_stock), len(CAR_GROUPS))
+        return jsonify({"error": error, "refused": True}), 422
+    car_master, main_hierarchy, item_stock = clean["car_master"], clean["main_hierarchy"], clean["item_stock"]
 
     global _feeder_hold, _feeder_dirty
     # One push applies at a time: two overlapping pushes would otherwise

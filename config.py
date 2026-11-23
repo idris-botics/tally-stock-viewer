@@ -103,6 +103,9 @@ class Config:
     INTAKE_SYNC_TOKEN = os.environ.get("INTAKE_SYNC_TOKEN", "").strip()
     CLOUD_SYNC_URL = os.environ.get("CLOUD_SYNC_URL", "").strip()
     CLOUD_SYNC_TOKEN = os.environ.get("CLOUD_SYNC_TOKEN", "").strip()
+    # A feeder push that would cut the number of cars or stock rows by more than this percentage is refused
+    # (HTTP 422) so a Tally hiccup cannot blank the catalogue. Not checked while fewer than 20 are served.
+    INTAKE_MAX_DROP_PERCENT = int(os.environ.get("INTAKE_MAX_DROP_PERCENT", "50"))
 
     # Rescan trigger -- lets a machine pushing new images straight onto
     # Render's disk over SCP (scripts/push_new_images.py) kick off the same

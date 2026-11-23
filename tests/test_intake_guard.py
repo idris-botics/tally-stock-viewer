@@ -90,7 +90,8 @@ class IntakeGuard(unittest.TestCase):
     def test_small_change_and_small_site_are_allowed(self):
         self.assertEqual(self.push(big_payload(20), FORCE_HEADERS).status_code, 200)
         self.assertEqual(self.push(big_payload(12)).status_code, 200)     # 40% drop: allowed
-        self.assertEqual(self.push(PAYLOAD).status_code, 200)             # served count is now 12 (< 20): check skipped
+        self.assertEqual(self.push(big_payload(9)).status_code, 200)      # 12 -> 9 cars, 24 -> 18 stock rows
+        self.assertEqual(self.push(PAYLOAD).status_code, 200)             # fewer than 20 cars and stock rows served: not checked
 
     def test_first_ever_push_is_allowed(self):
         self.assertEqual(self.push(big_payload(20), FORCE_HEADERS).status_code, 200)

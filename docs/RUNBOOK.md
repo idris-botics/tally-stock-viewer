@@ -28,6 +28,7 @@ Set on **Render** (Environment tab) for the site, or in the `.env` file on a PC.
 |---|---|---|
 | `DISABLE_TALLY_SCHEDULING` | `1` = cloud mode: no Tally contact, data arrives from the feeder. | `1` on Render |
 | `INTAKE_SYNC_TOKEN` | Secret the feeder must send to push stock. Empty = pushes refused. | secret |
+| `INTAKE_MAX_DROP_PERCENT` | A feeder push that would cut the number of cars, or of stock rows, by more than this percentage is refused (see "A push was refused" in section 3). Not checked while fewer than 20 are served. Leave unset normally. | `50` |
 | `CLOUD_SYNC_URL` / `CLOUD_SYNC_TOKEN` | **Shop PC only:** where the feeder pushes, and the secret (same value as `INTAKE_SYNC_TOKEN`). | secret |
 | `MACHINE_ROLE` | **Shop PC only:** `feeder` = this PC may only run the feeder; every web-app entry point refuses to start. Unset or `full` = normal (Render never sets it). Anything unclear is refused. | `feeder` on the shop PC |
 | `FEEDER_TASK_NAME` | Shop PC: name of the Windows task, if it is not `TallyFeeder`. Used by `update_feeder.bat`. | optional |
@@ -73,6 +74,8 @@ The Python version is **not pinned** in the repo: Render uses its default (3.14.
    The "after" numbers should be **back near the "before"** numbers. If sockets are higher after than before, the site also writes a plain warning: *"N more sockets are open after this run than before it -- possible connection leak"*. That means the connection leak (fixed 2026-10-18) is back: tell whoever maintains the site.
 4. Other backup lines: `Cloud backup: next scheduled run at <tomorrow> 02:00 IST` (appears after every start; proves the schedule is armed) and `Cloud backup: N new, N changed, N deleted, N unchanged`. In the System panel the Cloud Backup box should say **OK**. **Partial** with a red notice "N deletions held back" is the safety guard (section 8).
 5. In the System panel, **Feeder heartbeat** should be fresh (under 15 minutes during shop hours).
+
+**A push was refused.** The site checks every stock push before it writes anything. A push with no cars, no hierarchy rows or no stock rows, a row with a wrong value (for example a quantity that is not a whole number), a repeated car name, or a push that would cut the cars or the stock rows by more than `INTAKE_MAX_DROP_PERCENT` (default 50%) is answered with HTTP 422 and changes nothing: the site keeps serving the last good stock. Where to look: the shop PC's feeder log shows `Cloud sync push failed: HTTP 422 -- <reason>`, and in the System panel the **Feeder heartbeat** stops moving and goes stale. Usually the cause is on the Tally side (a different company open, or an empty export), so fix that and the next push goes through. If the big drop is real (for example a whole range of cars was deleted on purpose): raise `INTAKE_MAX_DROP_PERCENT` on Render (for example `90`), wait for one push to be accepted, then set it back to `50`. Do not leave it raised.
 
 ---
 
