@@ -102,7 +102,7 @@ class IntakeGuard(unittest.TestCase):
     # ---- wrong row contents
     def test_bad_row_types_are_refused(self):
         good = {"item_name": "ALTO 7D MAT BLACK", "qty": 3}
-        cases = [dict(good, qty="abc"), dict(good, qty=-1), dict(good, qty=2.5), dict(good, qty=None), dict(good, qty=True),
+        cases = [dict(good, qty="abc"), dict(good, qty=2.5), dict(good, qty=None), dict(good, qty=True),
                  dict(good, item_name=123), dict(good, item_name=""), dict(good, item_name=None)]
         for bad_row in cases:
             with self.subTest(row=bad_row):
@@ -113,6 +113,25 @@ class IntakeGuard(unittest.TestCase):
                 message = response.get_json()["error"]
                 self.assertIn("item_stock", message)
                 self.assertIn("row 1", message)
+
+    def test_negative_whole_quantity_is_accepted(self):
+        # Tally allows negative stock and main.xlsx is read back raw, so a negative whole number must never freeze the push.
+        payload = copy.deepcopy(PAYLOAD)
+        payload["item_stock"][0]["qty"] = -3
+        payload["item_stock"][1]["qty"] = -2.0
+        payload["main_hierarchy"][1]["qty"] = -3
+        payload["main_hierarchy"][2]["qty"] = -2.0
+        self.assertEqual(self.push(payload).status_code, 200)
+        stored = json.loads(self.file_bytes("item stock list.auto.json"))
+        self.assertEqual([stored[0]["qty"], stored[1]["qty"]], [-3, -2])
+        self.assertTrue(all(isinstance(row["qty"], int) for row in stored))
+        # still refused: wrong types and fractions
+        for bad in (True, None, "-3", 2.5, -2.5):
+            with self.subTest(qty=bad):
+                payload = copy.deepcopy(PAYLOAD); payload["item_stock"][0]["qty"] = bad
+                self.assertEqual(self.push(payload).status_code, 422)
+                payload = copy.deepcopy(PAYLOAD); payload["main_hierarchy"][1]["qty"] = bad
+                self.assertEqual(self.push(payload).status_code, 422)
 
     def test_bad_hierarchy_and_car_rows_are_refused(self):
         payload = copy.deepcopy(PAYLOAD); payload["main_hierarchy"][1]["qty"] = "abc"
