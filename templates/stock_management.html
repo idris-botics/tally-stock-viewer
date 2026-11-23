@@ -387,7 +387,7 @@
         };
         var tiles = el("div", { class: "tiles" }, [
             tile("low", lowFirst.total, "Running low", "Items still in stock but close to running out. Tap to show them.", lowFirst.total ? "soon" : ""),
-            tile("out", outFirst.total, "Sold out", "Items that were in stock since tracking began and are now at zero. Tap to show them.", outFirst.total ? "urgent" : ""),
+            tile("out", outFirst.total, "Sold out", "Items at zero that sold before or belong to a car dealers opened. Tap to show them.", outFirst.total ? "urgent" : ""),
             tile("order", orderCount, "On order list", "Items you have already picked to order. Tap to open the order list.", "")]);
         var search = searchBox(s.q, function (value) { s.q = value; s.pickView = true; load(); }, "Search an item or car", "Type part of an item name or car, then press Search. If nothing matches here, it jumps to the list that has matches.");
         var toolsChildren = [search];

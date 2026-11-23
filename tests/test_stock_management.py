@@ -217,26 +217,15 @@ class VelocityAndNeeds(StockMgmtBase):
         row = self.get("needs", section="low")["rows"][0]
         self.assertEqual(row["open_order"]["ordered_on"], "2026-03-17")
 
-    def test_sold_out_lists_only_items_that_were_in_stock_since_tracking_began(self):
+    def test_out_of_stock_relevant_items_only_unless_the_switch_is_on(self):
         self.tracking_since(10)
         self.in_stock(**{"CARB_ITEM_001": 1, "CARB_ITEM_002": 1, "CARB_ITEM_003": 1})
-        self.event("CARC ITEM 001", 4, 0, 2)                        # was in stock, sold out and gone: listed
-        self.event("CARC ITEM 002", 0, 3, 5)                        # only ever appeared (and is not in stock now): not a sell-out we saw
-        self.views("CARA", "dealer", 40)              # dealers open CARA a lot, but its items were never seen in stock
+        self.event("CARC ITEM 001", 4, 0, 2)                        # sold out and gone: relevant
+        self.views("CARA", "dealer", 3)                             # dealers open CARA: its items are relevant
         rows = self.get("needs", section="out")["rows"]
-        self.assertEqual(self.names(rows), ["CARC ITEM 001"])
-        self.assertEqual(self.get("needs", section="out")["total"], 1)
-        everything = self.get("needs", section="out", show_all=1)   # the old whole-catalogue request is still understood by the server
+        self.assertEqual(sorted(self.names(rows)), ["CARA ITEM 001", "CARA ITEM 002", "CARA ITEM 003", "CARC ITEM 001"])
+        everything = self.get("needs", section="out", show_all=1)
         self.assertEqual(everything["total"], 6)                    # CARA x3 + CARC x3 are out of stock (CARB is in stock)
-
-    def test_a_huge_catalogue_does_not_flood_the_sold_out_list(self):
-        self.tracking_since(10)
-        pushed = self.anon.post("/admin/intake/sync_data", json=catalogue_payload(["BIGCAR"], 250), headers=INTAKE_HEADERS)
-        self.assertEqual(pushed.status_code, 200)
-        self.sql("DELETE FROM stock_state")
-        self.views("BIGCAR", "dealer", 50)                          # a busy car with 250 items, none ever seen in stock
-        self.app_module._stock_mgmt_cache_clear()
-        self.assertEqual(self.get("needs", section="out")["total"], 0)
 
     def test_out_of_stock_sorted_by_selling_speed_then_interest(self):
         self.tracking_since(10)

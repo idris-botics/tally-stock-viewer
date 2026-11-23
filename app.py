@@ -6731,14 +6731,14 @@ def _stock_tab_needs(conn, section, q, page, show_all):
         rows = _stock_group_rows(rows)
     else:
         interest = _stock_car_interest(conn, bool(settings["include_admin"]))
-        # "Sold out" means it WAS in stock since tracking began (some event took it down from a quantity above 0) and
-        # is at 0 now. Items that were never seen in stock are not listed: for a car dealers opened that would be every
-        # design in the catalogue, thousands of rows nobody can act on.
-        names = {row[0]: row[1] for row in conn.execute("SELECT item_key, MAX(item_name) FROM stock_events WHERE qty_before > 0 GROUP BY item_key")}
+        names = {row[0]: row[1] for row in conn.execute("SELECT item_key, MAX(item_name) FROM stock_events GROUP BY item_key")}
         if show_all:
             candidates = set(catalogue["items"]) | set(names)
         else:
             candidates = set(names)
+            for car_key, opens in interest.items():
+                if opens > 0 and car_key in catalogue["cars"]:
+                    candidates.update(catalogue["cars"][car_key][1])
         for key in candidates:
             if key in state or (query and query not in key):
                 continue
