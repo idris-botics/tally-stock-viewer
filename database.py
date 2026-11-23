@@ -469,6 +469,7 @@ def init_database():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_folder_car_mapping ON folder_car_mapping(folder_name)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)")
         _ensure_users_schema(conn)
+        _ensure_stock_capture_schema(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_account_logs_timestamp ON account_logs(timestamp)")
         seed_default_data(conn)
@@ -636,6 +637,67 @@ def _migrate_drop_pricing_tables():
             raise
     finally:
         conn.close()
+
+
+def _ensure_stock_capture_schema(conn):
+    """Stock Management, Part A: silent history of stock changes and of which cars people open. All tables are
+    new and additive, and live in the same database file, so the nightly backup carries them automatically."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS stock_state (
+            item_key TEXT PRIMARY KEY,
+            item_name TEXT,
+            qty INTEGER NOT NULL,
+            updated_at_utc TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS stock_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            day_ist TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            item_name TEXT,
+            qty_before INTEGER NOT NULL,
+            qty_after INTEGER NOT NULL,
+            at_utc TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_stock_events_item_day ON stock_events (item_key, day_ist)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_stock_events_day ON stock_events (day_ist)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS capture_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS car_interest_daily (
+            day_ist TEXT NOT NULL,
+            car_key TEXT NOT NULL,
+            role TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            opens INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (day_ist, car_key, role, user_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS search_miss_daily (
+            day_ist TEXT NOT NULL,
+            term TEXT NOT NULL,
+            role TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (day_ist, term, role)
+        )
+        """
+    )
 
 
 def _ensure_users_schema(conn):

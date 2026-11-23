@@ -148,7 +148,8 @@ class StockCapture(CaptureBase):
         self.assertEqual(len(self.events()), 10)
         self.capture(items(1000))                                  # many appear, none vanish
         self.capture(items(1000, start=60))                        # 60 vanished of 1000 = 6%: under 15%
-        self.assertEqual(self.meta("suspicious_push_streak"), "0")
+        self.assertIn(self.meta("suspicious_push_streak"), (None, "0"))   # never suspicious: the key may not even exist
+        self.assertEqual(len(self.events()), 10 + 810 + 60 + 60)  # 60 sold out, 60 new
 
     def test_capture_failure_never_changes_the_intake_answer_or_the_files(self):
         pushed = copy.deepcopy(PAYLOAD)

@@ -6080,6 +6080,284 @@ def _apply_intake_files_as_one_unit(car_master, main_hierarchy, item_stock):
                 pass
 
 
+# ============================================================
+# STOCK MANAGEMENT, PART A -- silent capture (no pages)
+# ============================================================
+# Two things are remembered, both in the main database (so the nightly backup carries them):
+#   * stock history: every accepted feeder push is compared with the last accepted one and the differences are
+#     written as stock_events. item_stock only lists items with qty > 0, so an item missing from a push is 0.
+#   * interest: how often each car is opened (dealer and admin counted separately) and which searches found no car.
+# Nothing here may ever fail a push or a page: every caller wraps these in try/except and only logs.
+STOCK_PRUNE_EVENT_DAYS = 400
+STOCK_PRUNE_INTEREST_DAYS = 180
+STOCK_SUSPICIOUS_MIN_VANISHED = 50
+STOCK_SUSPICIOUS_PERCENT = 15
+STOCK_SUSPICIOUS_ACCEPT_AFTER = 3          # consecutive suspicious pushes (about 9 minutes) before the new level is trusted
+INTEREST_THROTTLE_SECONDS = 600
+INTEREST_MAX_TRACKED = 5000
+SEARCH_MISS_PREFIX_SECONDS = 60
+SEARCH_MISS_MIN_CHARS = 3
+SEARCH_MISS_MAX_CHARS = 60
+
+_STOCK_CAPTURE_LOCK = threading.Lock()
+_INTEREST_LOCK = threading.Lock()
+_INTEREST_RECENT = {}      # (user_id, car_key) -> monotonic time the open was last counted
+_SEARCH_MISS_LAST = {}     # user_id -> (term, monotonic time, day_ist) of that user's last recorded miss
+_known_car_keys_cache = {"ref": None, "size": -1, "keys": frozenset()}
+
+
+def _stock_now_utc():
+    """The one clock of this feature (a test replaces it). Always timezone-aware UTC."""
+    return datetime.now(timezone.utc)
+
+
+def _interest_clock():
+    return time.monotonic()
+
+
+def _today_ist():
+    """The calendar day in India (UTC+5:30) as YYYY-MM-DD, whatever time zone this machine is set to."""
+    return (_stock_now_utc() + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
+
+
+def _ist_day_minus(days):
+    return (_stock_now_utc() + timedelta(hours=5, minutes=30) - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+def _stock_item_key(name):
+    return re.sub(r"\s+", " ", str(name or "")).strip().upper()
+
+
+def _stock_in_stock_map(item_stock_clean):
+    """{item_key: (display_name, qty)} for the items that count as in stock. Mirrors how the site itself reads the
+    stock file (_load_training_stock_qty_map and friends): keyed by the cleaned upper-case name, a later row replaces
+    an earlier one, and a row whose quantity is 0 or less is ignored (so it never replaces a positive one)."""
+    current = {}
+    for row in item_stock_clean or []:
+        name = str(row.get("item_name") or "").strip()
+        try:
+            qty = int(row.get("qty") or 0)
+        except (TypeError, ValueError):
+            continue
+        if name and qty > 0:
+            current[_stock_item_key(name)] = (name, qty)
+    return current
+
+
+def _capture_meta_get(conn, key):
+    row = conn.execute("SELECT value FROM capture_meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def _capture_meta_set(conn, key, value):
+    conn.execute(
+        "INSERT INTO capture_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, str(value)),
+    )
+
+
+def _auto_receive_orders(events, conn=None):
+    """Filled in by the order tracker (Stock Management, Part B). Deliberately does nothing here."""
+    return None
+
+
+def _prune_stock_history(conn, day):
+    """Once per IST day: stock events older than 400 days, interest and search rows older than 180 days."""
+    if _capture_meta_get(conn, "last_prune_day_ist") == day:
+        return
+    conn.execute("DELETE FROM stock_events WHERE day_ist < ?", (_ist_day_minus(STOCK_PRUNE_EVENT_DAYS),))
+    cutoff = _ist_day_minus(STOCK_PRUNE_INTEREST_DAYS)
+    conn.execute("DELETE FROM car_interest_daily WHERE day_ist < ?", (cutoff,))
+    conn.execute("DELETE FROM search_miss_daily WHERE day_ist < ?", (cutoff,))
+    _capture_meta_set(conn, "last_prune_day_ist", day)
+
+
+def _capture_stock_changes(item_stock_clean):
+    """Compares a validated push with the last accepted quantities and records the differences, all in one
+    transaction. The first ever call only fills the baseline. A push in which a large share of the items vanish is
+    treated as suspicious (a feeder or Tally glitch must never become fake 'everything sold' history): nothing is
+    written until the same picture arrives three times in a row, and then it becomes the new baseline WITHOUT events."""
+    current = _stock_in_stock_map(item_stock_clean)
+    now_utc = _stock_now_utc()
+    now_text = now_utc.strftime("%Y-%m-%dT%H:%M:%S")
+    day = _today_ist()
+    with _STOCK_CAPTURE_LOCK, db.get_connection() as conn:
+        state = {row[0]: (row[1], row[2]) for row in conn.execute("SELECT item_key, item_name, qty FROM stock_state")}
+        started = _capture_meta_get(conn, "stock_tracking_started_at_utc")
+        if not state and not started:
+            if current:
+                conn.executemany(
+                    "INSERT INTO stock_state (item_key, item_name, qty, updated_at_utc) VALUES (?, ?, ?, ?)",
+                    [(key, name, qty, now_text) for key, (name, qty) in current.items()],
+                )
+                _capture_meta_set(conn, "stock_tracking_started_at_utc", now_text)
+            return
+
+        vanished = [key for key in state if key not in current]
+        streak = int(_capture_meta_get(conn, "suspicious_push_streak") or 0)
+        if (len(vanished) >= STOCK_SUSPICIOUS_MIN_VANISHED
+                and len(vanished) * 100 > STOCK_SUSPICIOUS_PERCENT * len(state)):
+            streak += 1
+            if streak >= STOCK_SUSPICIOUS_ACCEPT_AFTER:
+                logger.warning(
+                    "Stock capture: %d of %d items missing for %d pushes in a row; accepting the new stock list as the "
+                    "baseline without recording sales", len(vanished), len(state), streak)
+                conn.execute("DELETE FROM stock_state")
+                conn.executemany(
+                    "INSERT INTO stock_state (item_key, item_name, qty, updated_at_utc) VALUES (?, ?, ?, ?)",
+                    [(key, name, qty, now_text) for key, (name, qty) in current.items()],
+                )
+                _capture_meta_set(conn, "suspicious_push_streak", 0)
+            else:
+                logger.warning(
+                    "Stock capture: %d of %d items missing from this push (suspicious, %d in a row); nothing recorded",
+                    len(vanished), len(state), streak)
+                _capture_meta_set(conn, "suspicious_push_streak", streak)
+            return
+
+        events, upserts = [], []
+        for key, (name, qty) in current.items():
+            old = state.get(key)
+            if old is None:
+                events.append((day, key, name, 0, qty, now_text))
+                upserts.append((key, name, qty, now_text))
+            elif old[1] != qty:
+                events.append((day, key, name, old[1], qty, now_text))
+                upserts.append((key, name, qty, now_text))
+        for key in vanished:
+            events.append((day, key, state[key][0], state[key][1], 0, now_text))
+        if vanished:
+            conn.executemany("DELETE FROM stock_state WHERE item_key = ?", [(key,) for key in vanished])
+        if upserts:
+            conn.executemany(
+                "INSERT INTO stock_state (item_key, item_name, qty, updated_at_utc) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(item_key) DO UPDATE SET item_name = excluded.item_name, qty = excluded.qty, "
+                "updated_at_utc = excluded.updated_at_utc",
+                upserts,
+            )
+        if events:
+            conn.executemany(
+                "INSERT INTO stock_events (day_ist, item_key, item_name, qty_before, qty_after, at_utc) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                events,
+            )
+            _auto_receive_orders([(e[1], e[2], e[3], e[4]) for e in events], conn)
+        if streak:
+            _capture_meta_set(conn, "suspicious_push_streak", 0)
+        _prune_stock_history(conn, day)
+
+
+def _normalize_interest_term(text):
+    return re.sub(r"\s+", " ", str(text or "")).strip().lower()[:SEARCH_MISS_MAX_CHARS]
+
+
+def _known_car_keys():
+    """The cleaned names of the cars being served now (rebuilt only when the car list object changes)."""
+    cars = CAR_GROUPS
+    cache = _known_car_keys_cache
+    if cache["ref"] is not cars or cache["size"] != len(cars):
+        cache.update(ref=cars, size=len(cars), keys=frozenset(_stock_item_key(c) for c in cars))
+    return cache["keys"]
+
+
+def _interest_role():
+    role = _current_role()
+    return "admin" if role == "admin" else "dealer" if role == "customer" else None
+
+
+def _interest_mark_tracking_started(conn):
+    conn.execute("INSERT OR IGNORE INTO capture_meta (key, value) VALUES ('interest_tracking_started_at_utc', ?)",
+                 (_stock_now_utc().strftime("%Y-%m-%dT%H:%M:%S"),))
+
+
+def _record_car_open(user_id, role, car_name):
+    """Counts one open of a car for (today, car, role, user). The same user opening the same car again within
+    10 minutes (a reload) is not counted again."""
+    car_key = _stock_item_key(car_name)
+    if not car_key:
+        return
+    slot = (int(user_id), car_key)
+    now = _interest_clock()
+    with _INTEREST_LOCK:
+        last = _INTEREST_RECENT.get(slot)
+        if last is not None and now - last < INTEREST_THROTTLE_SECONDS:
+            return
+        if len(_INTEREST_RECENT) >= INTEREST_MAX_TRACKED and slot not in _INTEREST_RECENT:
+            _INTEREST_RECENT.clear()
+        _INTEREST_RECENT[slot] = now          # claimed before the write, so a failing database is not hammered
+    with db.get_connection() as conn:
+        conn.execute(
+            "INSERT INTO car_interest_daily (day_ist, car_key, role, user_id, opens) VALUES (?, ?, ?, ?, 1) "
+            "ON CONFLICT(day_ist, car_key, role, user_id) DO UPDATE SET opens = opens + 1",
+            (_today_ist(), car_key, role, int(user_id)),
+        )
+        _interest_mark_tracking_started(conn)
+
+
+def _record_search_miss(user_id, role, query):
+    """Counts a search that found no car, once per (today, term, role). The search box fires on every keystroke, so
+    a term that only extends this user's previous miss (within 60 seconds) replaces it instead of adding another,
+    and a shorter term (the user backspacing) is skipped."""
+    term = _normalize_interest_term(query)
+    if len(term) < SEARCH_MISS_MIN_CHARS:
+        return
+    day = _today_ist()
+    now = _interest_clock()
+    replaced_day = replaced_term = None
+    with _INTEREST_LOCK:
+        previous = _SEARCH_MISS_LAST.get(int(user_id))
+        if previous is not None and now - previous[1] < SEARCH_MISS_PREFIX_SECONDS:
+            if previous[0].startswith(term):
+                return                                   # same term again, or a shorter prefix of the last one
+            if term.startswith(previous[0]):
+                replaced_term, replaced_day = previous[0], previous[2]
+        elif previous is not None and previous[0] == term and now - previous[1] < INTEREST_THROTTLE_SECONDS:
+            return
+        if len(_SEARCH_MISS_LAST) >= INTEREST_MAX_TRACKED and int(user_id) not in _SEARCH_MISS_LAST:
+            _SEARCH_MISS_LAST.clear()
+        _SEARCH_MISS_LAST[int(user_id)] = (term, now, day)
+    with db.get_connection() as conn:
+        if replaced_term is not None:
+            conn.execute("UPDATE search_miss_daily SET count = count - 1 WHERE day_ist = ? AND term = ? AND role = ?",
+                         (replaced_day, replaced_term, role))
+            conn.execute("DELETE FROM search_miss_daily WHERE day_ist = ? AND term = ? AND role = ? AND count <= 0",
+                         (replaced_day, replaced_term, role))
+        conn.execute(
+            "INSERT INTO search_miss_daily (day_ist, term, role, count) VALUES (?, ?, ?, 1) "
+            "ON CONFLICT(day_ist, term, role) DO UPDATE SET count = count + 1",
+            (day, term, role),
+        )
+        _interest_mark_tracking_started(conn)
+
+
+@app.after_request
+def _record_stock_interest(response):
+    """Server-side only: it rides on the /designs and car-search requests that already happen (no new request, no
+    polling). Any problem is logged by class name and ignored."""
+    try:
+        if response.status_code >= 400:
+            return response
+        endpoint = request.endpoint
+        if endpoint not in ("designs", "search.search_cars"):
+            return response
+        user_id, role = _current_user_id(), _interest_role()
+        if user_id is None or role is None:
+            return response
+        if endpoint == "designs":
+            car = (request.args.get("car") or "").strip()
+            if car and _stock_item_key(car) in _known_car_keys():
+                _record_car_open(user_id, role, car)
+        elif request.args.get("page", 1, type=int) == 1 and not request.args.get("anchor_id"):
+            query = request.args.get("q", "")
+            if len(_normalize_interest_term(query)) >= SEARCH_MISS_MIN_CHARS:
+                payload = response.get_json(silent=True)
+                if isinstance(payload, dict) and payload.get("results") == []:
+                    _record_search_miss(user_id, role, query)
+    except Exception as exc:
+        logger.warning("stock interest tracking failed (%s)", type(exc).__name__)
+    return response
+
+
 @app.route("/admin/intake/sync_data", methods=["POST"])
 def intake_sync_data():
     expected_token = Config.INTAKE_SYNC_TOKEN
@@ -6151,6 +6429,14 @@ def intake_sync_data():
             with _VERSION_LOCK:
                 _feeder_hold = False
                 _feeder_dirty = True
+        # Only a push that was applied reaches this line (a failure above has already answered 500). The history is
+        # written after the files are safely in place and outside the block that rolls them back, so whatever happens
+        # in here can only be logged: it never changes the answer to the feeder and never undoes the push.
+        if Config.DISABLE_TALLY_SCHEDULING:
+            try:
+                _capture_stock_changes(item_stock)
+            except Exception:
+                logger.exception("Stock capture failed")
     finally:
         _INTAKE_APPLY_LOCK.release()
 
