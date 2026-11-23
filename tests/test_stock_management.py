@@ -231,6 +231,7 @@ class VelocityAndNeeds(StockMgmtBase):
     def test_catalogue_search_and_the_100_row_cap(self):
         pushed = self.anon.post("/admin/intake/sync_data", json=catalogue_payload(["BIGCAR"], 250), headers=INTAKE_HEADERS)
         self.assertEqual(pushed.status_code, 200)
+        self.sql("DELETE FROM stock_state")                          # the push put every item in stock; make them all out of stock
         self.app_module._stock_mgmt_cache_clear()
         first = self.get("needs", section="out", show_all=1)
         self.assertLessEqual(len(first["rows"]), 100)
@@ -590,11 +591,11 @@ class AdminOnly(StockMgmtBase):
         routes = self.new_routes()
         self.assertGreaterEqual(len(routes), 5)
         self.assertIn(("GET", BASE), routes)
-        for client in (self.dealer, self.anon):
+        for client, allowed in ((self.dealer, (403,)), (self.anon, (401, 403))):   # logged-out visitors are stopped even earlier, with 401
             for method, path in routes:
                 response = client.open(path, method=method, json={"action": "add", "item_name": "CARA ITEM 001", "qty": 1} if method == "POST" else None,
                                        query_string={"tab": "needs"} if method == "GET" else None)
-                self.assertEqual(response.status_code, 403, f"{method} {path}")
+                self.assertIn(response.status_code, allowed, f"{method} {path}")
         self.assertEqual(self.rows("SELECT COUNT(*) FROM restock_draft"), [(0,)])       # and nothing was written
 
     def test_admin_can_open_everything(self):

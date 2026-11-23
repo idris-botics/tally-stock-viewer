@@ -470,6 +470,7 @@ def init_database():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)")
         _ensure_users_schema(conn)
         _ensure_stock_capture_schema(conn)
+        _ensure_stock_mgmt_schema(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_account_logs_timestamp ON account_logs(timestamp)")
         seed_default_data(conn)
@@ -698,6 +699,46 @@ def _ensure_stock_capture_schema(conn):
         )
         """
     )
+
+
+def _ensure_stock_mgmt_schema(conn):
+    """Stock Management, Part B: settings, the order list and the order tracker. New tables only."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS stock_mgmt_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS restock_draft (
+            item_key TEXT PRIMARY KEY,
+            item_name TEXT,
+            qty INTEGER NOT NULL,
+            note TEXT,
+            added_at_utc TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS restock_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_key TEXT NOT NULL,
+            item_name TEXT,
+            qty_ordered INTEGER NOT NULL,
+            ordered_at_utc TEXT NOT NULL,
+            expected_date TEXT,
+            status TEXT NOT NULL DEFAULT 'ordered',
+            received_at_utc TEXT,
+            qty_received INTEGER,
+            note TEXT
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_restock_orders_item_status ON restock_orders (item_key, status)")
 
 
 def _ensure_users_schema(conn):

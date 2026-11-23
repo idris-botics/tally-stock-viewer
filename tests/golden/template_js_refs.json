@@ -111,6 +111,14 @@
    "static"
   ]
  },
+ "templates/stock_management.html": {
+  "ajax": [],
+  "fetch": [],
+  "fetch_with_variable_url": 2,
+  "url_for": [
+   "static"
+  ]
+ },
  "templates/system.html": {
   "ajax": [],
   "fetch": [

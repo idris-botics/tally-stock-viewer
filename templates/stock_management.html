@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Stock Management - Super Seatings</title>
+    <link rel="icon" type="image/jpeg" href="{{ url_for('static', filename='logo.jpg') }}">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        :root {
+            --bg: #f3f6fb;
+            --panel: #ffffff;
+            --text: #132238;
+            --muted: #4a5a72;
+            --border: #c9d5e3;
+            --accent: #1f6feb;
+            --accent-dark: #1553b8;
+            --good-bg: #e8f5e9;
+            --good-text: #1d5b3a;
+            --warn-bg: #fff4d6;
+            --warn-text: #7a4b00;
+            --bad-bg: #fdecea;
+            --bad-text: #a3190f;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            font-size: 18px;
+            line-height: 1.4;
+            color: var(--text);
+            background: var(--bg);
+        }
+        .page { max-width: 980px; margin: 0 auto; padding: 12px 12px 80px; }
+        .topbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+        .topbar h1 { font-size: 24px; margin: 0; flex: 1 1 auto; }
+        button, .btn, input, select, textarea { font: inherit; }
+        button, .btn {
+            min-height: 48px;
+            padding: 8px 16px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            background: #f8fafc;
+            color: var(--accent-dark);
+            font-weight: 700;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+        button.danger { color: var(--bad-text); }
+        button:disabled { opacity: .5; cursor: default; }
+        input[type=number], input[type=text], input[type=date], select {
+            min-height: 48px;
+            padding: 6px 10px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: #fff;
+            color: var(--text);
+            max-width: 100%;
+        }
+        input[type=number] { width: 7em; }
+        input[type=text].wide { width: 100%; }
+        input[type=checkbox] { width: 28px; height: 28px; }
+        .tabs { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; margin-bottom: 10px; }
+        .tabs button { flex: 0 0 auto; }
+        .tabs button[aria-selected=true] { background: var(--accent); color: #fff; border-color: var(--accent); }
+        .banner { background: var(--warn-bg); color: var(--warn-text); border-radius: 12px; padding: 10px 14px; margin-bottom: 12px; font-weight: 700; }
+        .banner.calm { background: var(--good-bg); color: var(--good-text); }
+        .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 14px; }
+        .panel h2 { margin: 0 0 8px; font-size: 21px; }
+        .hint { color: var(--muted); font-size: 16px; margin: 4px 0 10px; }
+        .row { border-top: 1px solid var(--border); padding: 12px 0; display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+        .row:first-of-type { border-top: 0; }
+        .row.dim { opacity: .65; }
+        .grow { flex: 1 1 260px; min-width: 0; }
+        .name { font-weight: 700; font-size: 19px; overflow-wrap: anywhere; }
+        .meta { color: var(--muted); font-size: 16px; }
+        .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 15px; font-weight: 700; background: var(--good-bg); color: var(--good-text); }
+        .badge.late { background: var(--bad-bg); color: var(--bad-text); }
+        .badge.info { background: #e6efff; color: var(--accent-dark); }
+        .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px; }
+        .controls label { display: inline-flex; gap: 8px; align-items: center; font-weight: 700; }
+        .msg { position: sticky; top: 6px; z-index: 5; margin-bottom: 10px; padding: 10px 14px; border-radius: 12px; font-weight: 700; display: none; }
+        .msg.ok { display: block; background: var(--good-bg); color: var(--good-text); }
+        .msg.err { display: block; background: var(--bad-bg); color: var(--bad-text); }
+        .empty { color: var(--muted); padding: 12px 0; }
+        textarea.copybox { width: 100%; min-height: 160px; font-size: 16px; }
+        #printSheet { display: none; }
+        @media (max-width: 520px) {
+            body { font-size: 17px; }
+            input[type=number] { width: 6em; }
+        }
+        @media print {
+            .no-print { display: none !important; }
+            #printSheet { display: block !important; color: #000; background: #fff; font-size: 14pt; white-space: pre-wrap; }
+            body { background: #fff; }
+        }
+    </style>
+</head>
+<body>
+<div class="page">
+    <div class="topbar no-print">
+        <a class="btn" href="/">&larr; Back</a>
+        <h1>Stock Management</h1>
+        <button type="button" id="refreshBtn">Refresh</button>
+    </div>
+    <div id="banner" class="banner no-print" role="status"></div>
+    <div id="msg" class="msg no-print" role="status" aria-live="polite"></div>
+    <div class="tabs no-print" role="tablist" id="tabs">
+        <button type="button" role="tab" data-tab="needs">Needs restocking</button>
+        <button type="button" role="tab" data-tab="order">Order list</button>
+        <button type="button" role="tab" data-tab="ordered">Ordered</button>
+        <button type="button" role="tab" data-tab="slow">Slow stock</button>
+        <button type="button" role="tab" data-tab="asked">Asked for</button>
+    </div>
+    <div id="panel" class="no-print"></div>
+    <div id="printSheet"></div>
+</div>
+<script>
+(function () {
+    "use strict";
+    var BASE = "/admin/stock_mgmt";
+    var tabNames = ["needs", "order", "ordered", "slow", "asked"];
+    var current = "needs";
+    var ui = { needs: { showAll: false, q: "", lowPage: 1, outPage: 1 }, slow: { days: 60, q: "", page: 1 },
+               asked: { showAll: false, q: "", page: 1, missPage: 1 }, ordered: { page: 1 } };
+    var panel = document.getElementById("panel");
+    var banner = document.getElementById("banner");
+    var msg = document.getElementById("msg");
+    var tabLoadCount = 0;
+
+    function el(tag, attrs, kids) {
+        var node = document.createElement(tag);
+        Object.keys(attrs || {}).forEach(function (key) {
+            var value = attrs[key];
+            if (key === "text") { node.textContent = value; }
+            else if (key === "class") { node.className = value; }
+            else if (key.indexOf("on") === 0) { node.addEventListener(key.slice(2), value); }
+            else if (value === true) { node.setAttribute(key, ""); }
+            else if (value !== false && value !== null && value !== undefined) { node.setAttribute(key, value); }
+        });
+        (kids || []).forEach(function (kid) { if (kid) { node.appendChild(typeof kid === "string" ? document.createTextNode(kid) : kid); } });
+        return node;
+    }
+    function say(text, bad) {
+        msg.textContent = text;
+        msg.className = "msg no-print " + (bad ? "err" : "ok");
+    }
+    function quiet() { msg.className = "msg no-print"; msg.textContent = ""; }
+    function qs(params) {
+        return Object.keys(params).filter(function (k) { return params[k] !== "" && params[k] !== null && params[k] !== undefined; })
+            .map(function (k) { return encodeURIComponent(k) + "=" + encodeURIComponent(params[k]); }).join("&");
+    }
+    async function getData(params) {
+        var response = await fetch(BASE + "/data?" + qs(params), { cache: "no-store", credentials: "same-origin" });
+        var data = {};
+        try { data = await response.json(); } catch (e) { data = {}; }
+        if (!response.ok) { throw new Error(data.error || "Could not load. Please try again."); }
+        return data;
+    }
+    async function send(path, body) {
+        var response = await fetch(BASE + path, { method: "POST", credentials: "same-origin",
+            headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        var data = {};
+        try { data = await response.json(); } catch (e) { data = {}; }
+        return { ok: response.ok, status: response.status, data: data };
+    }
+    function when(iso) {
+        if (!iso) { return ""; }
+        var p = iso.split("-");
+        var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        return parseInt(p[2], 10) + " " + months[parseInt(p[1], 10) - 1] + " " + p[0];
+    }
+    function setBanner(tracking, useInterest) {
+        var text = useInterest ? tracking.interest_banner : tracking.banner;
+        banner.textContent = text || "";
+        banner.className = "banner no-print" + (!useInterest && tracking.stock_days >= 7 ? " calm" : "");
+    }
+    function moreButton(data, onMore) {
+        return data.more ? el("button", { type: "button", text: "Show more", onclick: onMore }) : null;
+    }
+    function searchBox(value, onSearch, placeholder) {
+        var input = el("input", { type: "text", value: value, placeholder: placeholder || "Search by name", maxlength: "80", "aria-label": "Search" });
+        var go = el("button", { type: "button", text: "Search", onclick: function () { onSearch(input.value.trim()); } });
+        input.addEventListener("keydown", function (event) { if (event.key === "Enter") { onSearch(input.value.trim()); } });
+        return el("div", { class: "controls" }, [input, go]);
+    }
+    function orderBadge(order) {
+        return order ? el("span", { class: "badge info", text: "Ordered " + when(order.ordered_on) }) : null;
+    }
+    function addToListRow(row) {
+        var qty = el("input", { type: "number", min: "1", max: "100000", step: "1", value: String(row.suggested_qty), "aria-label": "Quantity to order" });
+        var button = el("button", { type: "button", class: "primary", text: row.on_order_list ? "Update order list" : "Add to order list" });
+        button.addEventListener("click", async function () {
+            var result = await send("/draft", { action: "add", item_name: row.item_name, qty: parseInt(qty.value, 10) });
+            if (result.ok) { say(row.item_name + " is on the order list."); button.textContent = "Update order list"; }
+            else { say(result.data.error || "Could not add.", true); }
+        });
+        return el("div", { class: "controls", style: "margin:0" }, [qty, button]);
+    }
+
+    // ---------------- tab 1: needs restocking
+    async function renderNeeds() {
+        var s = ui.needs;
+        var low = await getData({ tab: "needs", section: "low", page: s.lowPage });
+        var out = await getData({ tab: "needs", section: "out", page: s.outPage, q: s.q, show_all: s.showAll ? 1 : 0 });
+        setBanner(low.tracking, false);
+        var settings = low.settings;
+        var fields = {};
+        function numberField(key, label, min, max) {
+            fields[key] = el("input", { type: "number", min: String(min), max: String(max), step: "1", value: String(settings[key]), "aria-label": label });
+            return el("label", {}, [label + " ", fields[key]]);
+        }
+        var saveBtn = el("button", { type: "button", class: "primary", text: "Save settings", onclick: async function () {
+            var body = {};
+            Object.keys(fields).forEach(function (k) { body[k] = parseInt(fields[k].value, 10); });
+            var result = await send("/settings", body);
+            if (result.ok) { say("Settings saved."); load(); } else { say(result.data.error || "Could not save.", true); }
+        } });
+        var box = el("div", { class: "panel" }, [
+            el("h2", { text: "Settings" }),
+            el("div", { class: "controls" }, [numberField("low_days", "Warn when days left is", 1, 365), numberField("low_qty", "or quantity is", 0, 1000),
+                numberField("order_cover_days", "Order enough for (days)", 1, 365), saveBtn])
+        ]);
+        var lowBox = el("div", { class: "panel" }, [el("h2", { text: "Running low (" + low.total + ")" }),
+            el("div", { class: "hint", text: "Days left is an estimate from how fast the stock went down." })]);
+        if (!low.rows.length) { lowBox.appendChild(el("div", { class: "empty", text: "Nothing is running low right now." })); }
+        low.rows.forEach(function (row) {
+            var info = [el("div", { class: "name", text: row.item_name }),
+                el("div", { class: "meta", text: "In stock: " + row.qty + (row.no_recent_sales ? " - no recent sales" :
+                    " - selling about " + row.speed + " a day" + (row.days_left !== null ? " - about " + row.days_left + " days left (estimate)" : "")) }),
+                orderBadge(row.open_order)];
+            lowBox.appendChild(el("div", { class: "row" + (row.open_order ? " dim" : "") }, [el("div", { class: "grow" }, info), addToListRow(row)]));
+        });
+        var lowMore = moreButton(low, function () { s.lowPage += 1; load(); });
+        if (lowMore) { lowBox.appendChild(lowMore); }
+
+        var outBox = el("div", { class: "panel" }, [el("h2", { text: "Out of stock (" + out.total + ")" })]);
+        var toggle = el("input", { type: "checkbox", id: "showAllOut" });
+        toggle.checked = s.showAll;
+        toggle.addEventListener("change", function () { s.showAll = toggle.checked; s.outPage = 1; load(); });
+        outBox.appendChild(el("div", { class: "controls" }, [el("label", {}, [toggle, "Show all catalogue items that are out of stock"])]));
+        outBox.appendChild(searchBox(s.q, function (value) { s.q = value; s.outPage = 1; load(); }));
+        if (!out.rows.length) { outBox.appendChild(el("div", { class: "empty", text: s.showAll || s.q ? "No items found." : "No out-of-stock item needs attention yet." })); }
+        out.rows.forEach(function (row) {
+            var info = [el("div", { class: "name", text: row.item_name }),
+                el("div", { class: "meta", text: (row.speed > 0 ? "Was selling about " + row.speed + " a day" : "No recent sales") + (row.asked ? " - cars asked about " + row.asked + " times" : "") }),
+                orderBadge(row.open_order)];
+            outBox.appendChild(el("div", { class: "row" + (row.open_order ? " dim" : "") }, [el("div", { class: "grow" }, info), addToListRow(row)]));
+        });
+        var outMore = moreButton(out, function () { s.outPage += 1; load(); });
+        if (outMore) { outBox.appendChild(outMore); }
+        panel.replaceChildren(box, lowBox, outBox);
+    }
+
+    // ---------------- tab 2: order list
+    function showCopyBox(text) {
+        var area = el("textarea", { class: "copybox", readonly: true, "aria-label": "Order list text" });
+        area.value = text;
+        panel.insertBefore(el("div", { class: "panel" }, [el("div", { class: "hint", text: "Select all the text below, then copy it." }), area]), panel.firstChild);
+        area.focus();
+        area.select();
+    }
+    async function copyText(text) {
+        try {
+            if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); say("Copied. You can paste it into WhatsApp."); return; }
+        } catch (error) { /* fall through to the older way */ }
+        var scratch = el("textarea", { readonly: true, style: "position:fixed;top:0;left:0;opacity:0" });
+        scratch.value = text;
+        document.body.appendChild(scratch);
+        scratch.select();
+        scratch.setSelectionRange(0, text.length);
+        var copied = false;
+        try { copied = document.execCommand("copy"); } catch (error) { copied = false; }
+        document.body.removeChild(scratch);
+        if (copied) { say("Copied. You can paste it into WhatsApp."); } else { showCopyBox(text); say("Could not copy by itself. Select the text and copy it.", true); }
+    }
+    async function placeOrders(body) {
+        var result = await send("/orders", Object.assign({ action: "place" }, body));
+        if (result.status === 409 && result.data.needs_confirm) {
+            var names = (result.data.duplicates || []).join(", ");
+            if (window.confirm("These items already have an open order:\n" + names + "\n\nOrder them again?")) {
+                result = await send("/orders", Object.assign({ action: "place", confirm_duplicates: true }, body));
+            } else { return; }
+        }
+        if (result.ok) { say("Marked as ordered."); load(); } else { say(result.data.error || "Could not mark as ordered.", true); }
+    }
+    async function renderOrder() {
+        var data = await getData({ tab: "order" });
+        setBanner(data.tracking, false);
+        document.getElementById("printSheet").textContent = data.text || "";
+        var expected = el("input", { type: "date", min: "2020-01-01", "aria-label": "Expected date" });
+        var ticks = {};
+        var top = el("div", { class: "panel" }, [el("h2", { text: "Order list (" + data.total_items + ")" }),
+            el("div", { class: "controls" }, [
+                el("button", { type: "button", text: "Copy as text", disabled: !data.total_items, onclick: function () { copyText(data.text); } }),
+                el("button", { type: "button", text: "Print", disabled: !data.total_items, onclick: function () { window.print(); } })]),
+            el("div", { class: "controls" }, [el("label", {}, ["Expected date (optional) ", expected]),
+                el("button", { type: "button", class: "primary", text: "Mark all as ordered", disabled: !data.total_items, onclick: function () {
+                    placeOrders({ all: true, expected_date: expected.value || null }); } }),
+                el("button", { type: "button", text: "Mark ticked as ordered", disabled: !data.total_items, onclick: function () {
+                    var keys = Object.keys(ticks).filter(function (k) { return ticks[k].checked; });
+                    if (!keys.length) { say("Tick the items first.", true); return; }
+                    placeOrders({ item_keys: keys, expected_date: expected.value || null }); } })]),
+            el("div", { class: "controls" }, [el("button", { type: "button", text: "Undo last action", disabled: !data.can_undo, onclick: undo })])]);
+        var parts = [top];
+        if (!data.total_items) { parts.push(el("div", { class: "panel empty", text: "The order list is empty. Add items from Needs restocking or Asked for." })); }
+        data.groups.forEach(function (group) {
+            var box = el("div", { class: "panel" }, [el("h2", { text: group.name })]);
+            group.items.forEach(function (item) {
+                var tick = el("input", { type: "checkbox", "aria-label": "Tick " + item.item_name });
+                ticks[item.item_key] = tick;
+                var qty = el("input", { type: "number", min: "1", max: "100000", step: "1", value: String(item.qty), "aria-label": "Quantity" });
+                qty.addEventListener("change", async function () {
+                    var result = await send("/draft", { action: "update", item_key: item.item_key, qty: parseInt(qty.value, 10) });
+                    if (result.ok) { say("Saved."); } else { say(result.data.error || "Could not save.", true); load(); }
+                });
+                var note = el("input", { type: "text", class: "wide", maxlength: "200", value: item.note, placeholder: "Note (optional)", "aria-label": "Note" });
+                note.addEventListener("change", async function () {
+                    var result = await send("/draft", { action: "update", item_key: item.item_key, note: note.value });
+                    if (result.ok) { say("Saved."); } else { say(result.data.error || "Could not save.", true); }
+                });
+                var remove = el("button", { type: "button", class: "danger", text: "Remove", onclick: async function () {
+                    var result = await send("/draft", { action: "remove", item_key: item.item_key });
+                    if (result.ok) { load(); } else { say(result.data.error || "Could not remove.", true); }
+                } });
+                box.appendChild(el("div", { class: "row" }, [tick,
+                    el("div", { class: "grow" }, [el("div", { class: "name", text: item.item_name }),
+                        item.has_open_order ? el("span", { class: "badge info", text: "Already has an open order" }) : null, note]),
+                    qty, remove]));
+            });
+            parts.push(box);
+        });
+        panel.replaceChildren.apply(panel, parts);
+    }
+    async function undo() {
+        var result = await send("/orders", { action: "undo" });
+        if (result.ok) { say("Undone."); load(); } else { say(result.data.error || "Nothing to undo.", true); }
+    }
+
+    // ---------------- tab 3: ordered
+    async function renderOrdered() {
+        var data = await getData({ tab: "ordered", page: ui.ordered.page });
+        setBanner(data.tracking, false);
+        var top = el("div", { class: "panel" }, [el("h2", { text: "Open orders (" + data.total + ")" }),
+            el("div", { class: "hint", text: "When the shop stock goes up, the matching order is marked received by itself." }),
+            el("div", { class: "controls" }, [el("button", { type: "button", text: "Undo last action", disabled: !data.can_undo, onclick: undo })])]);
+        if (!data.open.length) { top.appendChild(el("div", { class: "empty", text: "No open orders." })); }
+        data.open.forEach(function (order) {
+            var date = el("input", { type: "date", min: "2020-01-01", value: order.expected_date || "", "aria-label": "Expected date" });
+            var received = el("input", { type: "number", min: "1", max: "100000", step: "1", value: String(order.qty_ordered), "aria-label": "Quantity received" });
+            var act = async function (body, done) {
+                var result = await send("/orders", body);
+                if (result.ok) { say(done); load(); } else { say(result.data.error || "Could not save.", true); }
+            };
+            var age = order.age_days === 0 ? "today" : order.age_days + (order.age_days === 1 ? " day ago" : " days ago");
+            var info = el("div", { class: "grow" }, [el("div", { class: "name", text: order.item_name + " - " + order.qty_ordered }),
+                el("div", { class: "meta", text: "Ordered " + age + " (" + when(order.ordered_on) + ")" + (order.expected_date ? " - expected " + when(order.expected_date) : "") }),
+                order.overdue ? el("span", { class: "badge late", text: "Overdue" }) : null,
+                order.note ? el("div", { class: "meta", text: order.note }) : null]);
+            top.appendChild(el("div", { class: "row" }, [info,
+                el("div", { class: "controls", style: "margin:0" }, [received,
+                    el("button", { type: "button", class: "primary", text: "Mark received", onclick: function () {
+                        act({ action: "receive", id: order.id, qty_received: parseInt(received.value, 10) }, "Marked as received."); } })]),
+                el("div", { class: "controls", style: "margin:0" }, [date,
+                    el("button", { type: "button", text: "Save date", onclick: function () {
+                        act({ action: "expected", id: order.id, expected_date: date.value || null }, "Date saved."); } }),
+                    el("button", { type: "button", class: "danger", text: "Cancel order", onclick: function () {
+                        if (window.confirm("Cancel the order for " + order.item_name + "?")) { act({ action: "cancel", id: order.id }, "Order cancelled."); } } })])]));
+        });
+        var more = moreButton(data, function () { ui.ordered.page += 1; load(); });
+        if (more) { top.appendChild(more); }
+        var recent = el("div", { class: "panel" }, [el("h2", { text: "Received in the last 30 days" })]);
+        if (!data.recent.length) { recent.appendChild(el("div", { class: "empty", text: "Nothing received yet." })); }
+        data.recent.forEach(function (order) {
+            recent.appendChild(el("div", { class: "row" }, [el("div", { class: "grow" }, [el("div", { class: "name", text: order.item_name }),
+                el("div", { class: "meta", text: "Received " + when(order.received_on) + " - " + order.qty_received + " (ordered " + order.qty_ordered + ")" })])]));
+        });
+        panel.replaceChildren(top, recent);
+    }
+
+    // ---------------- tab 4: slow stock
+    async function renderSlow() {
+        var s = ui.slow;
+        var data = await getData({ tab: "slow", days: s.days, q: s.q, page: s.page });
+        setBanner(data.tracking, false);
+        var select = el("select", { "aria-label": "Days without a sale" }, [el("option", { value: "60", text: "60 days" }), el("option", { value: "90", text: "90 days" })]);
+        select.value = String(s.days);
+        select.addEventListener("change", function () { s.days = parseInt(select.value, 10); s.page = 1; load(); });
+        var box = el("div", { class: "panel" }, [el("h2", { text: "Slow stock" }),
+            el("div", { class: "controls" }, [el("label", {}, ["In stock, nothing sold for at least ", select])])]);
+        if (data.insufficient_history) {
+            box.appendChild(el("div", { class: "empty", text: data.message }));
+        } else {
+            box.appendChild(searchBox(s.q, function (value) { s.q = value; s.page = 1; load(); }));
+            box.appendChild(el("div", { class: "hint", text: data.total + " items" }));
+            if (!data.rows.length) { box.appendChild(el("div", { class: "empty", text: "No slow items." })); }
+            data.rows.forEach(function (row) {
+                box.appendChild(el("div", { class: "row" }, [el("div", { class: "grow" }, [el("div", { class: "name", text: row.item_name }),
+                    el("div", { class: "meta", text: "In stock: " + row.qty + " - sitting " + row.days_sitting + " days - " +
+                        (row.last_decrease ? "last sold " + when(row.last_decrease) : "no sale since tracking began") })])]));
+            });
+            var more = moreButton(data, function () { s.page += 1; load(); });
+            if (more) { box.appendChild(more); }
+        }
+        panel.replaceChildren(box);
+    }
+
+    // ---------------- tab 5: asked for
+    async function renderAsked() {
+        var s = ui.asked;
+        var data = await getData({ tab: "asked", block: "cars", page: s.page, q: s.q, show_all: s.showAll ? 1 : 0 });
+        var misses = await getData({ tab: "asked", block: "misses", page: s.missPage });
+        setBanner(data.tracking, true);
+        var includeAdmin = el("input", { type: "checkbox" });
+        includeAdmin.checked = !!data.include_admin;
+        includeAdmin.addEventListener("change", async function () {
+            var result = await send("/settings", { include_admin: includeAdmin.checked ? 1 : 0 });
+            if (result.ok) { load(); } else { say(result.data.error || "Could not save.", true); }
+        });
+        var maxItems = el("input", { type: "number", min: "0", max: "1000", step: "1", value: String(data.max_items), "aria-label": "Show cars with at most this many items in stock" });
+        var apply = el("button", { type: "button", text: "Apply", onclick: async function () {
+            var result = await send("/settings", { asked_max_items: parseInt(maxItems.value, 10) });
+            if (result.ok) { say("Saved."); load(); } else { say(result.data.error || "Could not save.", true); }
+        } });
+        var all = el("input", { type: "checkbox" });
+        all.checked = s.showAll;
+        all.addEventListener("change", function () { s.showAll = all.checked; s.page = 1; load(); });
+        var box = el("div", { class: "panel" }, [el("h2", { text: "Cars people opened with little stock" }),
+            el("div", { class: "hint", text: "Counts of times a car was opened in the last 30 days." }),
+            el("div", { class: "controls" }, [el("label", {}, [includeAdmin, "Include admin searches"]), el("label", {}, [all, "Show all searched cars"])]),
+            el("div", { class: "controls" }, [el("label", {}, ["Only cars with at most ", maxItems, " items in stock"]), apply]),
+            searchBox(s.q, function (value) { s.q = value; s.page = 1; load(); }, "Search a car")]);
+        if (!data.cars.length) { box.appendChild(el("div", { class: "empty", text: "No cars match yet." })); }
+        data.cars.forEach(function (car) {
+            var detail = el("div", { class: "panel", style: "display:none;width:100%;margin:6px 0 0" });
+            var button = el("button", { type: "button", text: "See out-of-stock items" });
+            button.addEventListener("click", async function () {
+                if (detail.style.display === "block") { detail.style.display = "none"; return; }
+                try {
+                    var items = await getData({ tab: "asked", block: "car_items", car: car.car_key });
+                    detail.replaceChildren();
+                    if (!items.items.length) { detail.appendChild(el("div", { class: "empty", text: "Nothing is out of stock for this car." })); }
+                    items.items.forEach(function (item) {
+                        detail.appendChild(el("div", { class: "row" + (item.open_order ? " dim" : "") }, [el("div", { class: "grow" }, [el("div", { class: "name", text: item.item_name }), orderBadge(item.open_order)]), addToListRow(item)]));
+                    });
+                    detail.style.display = "block";
+                } catch (error) { say(error.message, true); }
+            });
+            var dealerText = "Dealers " + car.dealer_opens_7 + " this week, " + car.dealer_opens_30 + " in 30 days (" + car.dealers + " different)";
+            var adminText = data.include_admin ? " - Admin/shop " + car.admin_opens_7 + " this week, " + car.admin_opens_30 + " in 30 days" : "";
+            box.appendChild(el("div", { class: "row" }, [el("div", { class: "grow" }, [el("div", { class: "name", text: car.car_name }),
+                el("div", { class: "meta", text: "Opened " + car.total_7 + " times this week, " + car.total_30 + " in 30 days. " + dealerText + adminText }),
+                el("div", { class: "meta", text: car.in_stock + " items in stock, " + car.out_of_stock + " out of stock" })]), button, detail]));
+        });
+        var more = moreButton(data, function () { s.page += 1; load(); });
+        if (more) { box.appendChild(more); }
+        var missBox = el("div", { class: "panel" }, [el("h2", { text: "Searched but not found" }),
+            el("div", { class: "hint", text: "Searches that showed no car at all in the last 30 days." })]);
+        if (!misses.terms.length) { missBox.appendChild(el("div", { class: "empty", text: "No missed searches yet." })); }
+        misses.terms.forEach(function (term) {
+            missBox.appendChild(el("div", { class: "row" }, [el("div", { class: "grow" }, [el("div", { class: "name", text: term.term }),
+                el("div", { class: "meta", text: term.total + " searches (dealers " + term.dealer + (data.include_admin ? ", admin/shop " + term.admin : "") + ")" })])]));
+        });
+        var missMore = moreButton(misses, function () { s.missPage += 1; load(); });
+        if (missMore) { missBox.appendChild(missMore); }
+        panel.replaceChildren(box, missBox);
+    }
+
+    var renderers = { needs: renderNeeds, order: renderOrder, ordered: renderOrdered, slow: renderSlow, asked: renderAsked };
+    async function load() {
+        var ticket = ++tabLoadCount;
+        try {
+            await renderers[current]();
+            if (ticket === tabLoadCount) { quiet(); }
+        } catch (error) {
+            say(error.message || "Could not load. Please try again.", true);
+        }
+    }
+    function select(tab) {
+        current = tab;
+        Array.prototype.forEach.call(document.querySelectorAll("#tabs button"), function (button) {
+            button.setAttribute("aria-selected", button.getAttribute("data-tab") === tab ? "true" : "false");
+        });
+        try { window.location.hash = tab; } catch (error) { /* ignore */ }
+        load();
+    }
+    Array.prototype.forEach.call(document.querySelectorAll("#tabs button"), function (button) {
+        button.addEventListener("click", function () { select(button.getAttribute("data-tab")); });
+    });
+    document.getElementById("refreshBtn").addEventListener("click", function () { load(); });
+    document.addEventListener("visibilitychange", function () { if (!document.hidden) { load(); } });
+    var start = (window.location.hash || "").replace("#", "");
+    select(tabNames.indexOf(start) >= 0 ? start : "needs");
+})();
+</script>
+</body>
+</html>

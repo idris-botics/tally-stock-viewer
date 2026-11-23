@@ -1,8 +1,8 @@
 {
  "admin_locked GET /": {
-  "body": "1cf283e078",
+  "body": "f340d2aea2",
   "cache": "",
-  "len": 195724,
+  "len": 195979,
   "location": "",
   "status": 200,
   "type": "text/html"
@@ -53,6 +53,22 @@
   "len": 69,
   "location": "",
   "status": 200,
+  "type": "application/json"
+ },
+ "admin_locked GET /admin/stock_mgmt": {
+  "body": "878f726320",
+  "cache": "",
+  "len": 28125,
+  "location": "",
+  "status": 200,
+  "type": "text/html"
+ },
+ "admin_locked GET /admin/stock_mgmt/data": {
+  "body": "865e18fdd7",
+  "cache": "no-store",
+  "len": 24,
+  "location": "",
+  "status": 400,
   "type": "application/json"
  },
  "admin_locked GET /admin/system": {
@@ -655,6 +671,30 @@
   "status": 403,
   "type": "application/json"
  },
+ "admin_locked POST /admin/stock_mgmt/draft": {
+  "body": "85d43783ef",
+  "cache": "no-store",
+  "len": 27,
+  "location": "",
+  "status": 400,
+  "type": "application/json"
+ },
+ "admin_locked POST /admin/stock_mgmt/orders": {
+  "body": "85d43783ef",
+  "cache": "no-store",
+  "len": 27,
+  "location": "",
+  "status": 400,
+  "type": "application/json"
+ },
+ "admin_locked POST /admin/stock_mgmt/settings": {
+  "body": "8752fa3454",
+  "cache": "no-store",
+  "len": 28,
+  "location": "",
+  "status": 400,
+  "type": "application/json"
+ },
  "admin_locked POST /admin/system/categories/abbreviation": {
   "body": "d9f3b7324c",
   "cache": "no-store",
@@ -856,9 +896,9 @@
   "type": "application/json"
  },
  "admin_unlocked GET /": {
-  "body": "1cf283e078",
+  "body": "f340d2aea2",
   "cache": "",
-  "len": 195724,
+  "len": 195979,
   "location": "",
   "status": 200,
   "type": "text/html"
@@ -909,6 +949,22 @@
   "len": 69,
   "location": "",
   "status": 200,
+  "type": "application/json"
+ },
+ "admin_unlocked GET /admin/stock_mgmt": {
+  "body": "878f726320",
+  "cache": "",
+  "len": 28125,
+  "location": "",
+  "status": 200,
+  "type": "text/html"
+ },
+ "admin_unlocked GET /admin/stock_mgmt/data": {
+  "body": "865e18fdd7",
+  "cache": "no-store",
+  "len": 24,
+  "location": "",
+  "status": 400,
   "type": "application/json"
  },
  "admin_unlocked GET /admin/system": {
@@ -1511,6 +1567,30 @@
   "status": 200,
   "type": "application/json"
  },
+ "admin_unlocked POST /admin/stock_mgmt/draft": {
+  "body": "85d43783ef",
+  "cache": "no-store",
+  "len": 27,
+  "location": "",
+  "status": 400,
+  "type": "application/json"
+ },
+ "admin_unlocked POST /admin/stock_mgmt/orders": {
+  "body": "85d43783ef",
+  "cache": "no-store",
+  "len": 27,
+  "location": "",
+  "status": 400,
+  "type": "application/json"
+ },
+ "admin_unlocked POST /admin/stock_mgmt/settings": {
+  "body": "8752fa3454",
+  "cache": "no-store",
+  "len": 28,
+  "location": "",
+  "status": 400,
+  "type": "application/json"
+ },
  "admin_unlocked POST /admin/system/categories/abbreviation": {
   "body": "d9f3b7324c",
   "cache": "no-store",
@@ -1763,6 +1843,22 @@
   "body": "8d3ff4f90d",
   "cache": "",
   "len": 6132,
+  "location": "",
+  "status": 401,
+  "type": "text/html"
+ },
+ "anonymous GET /admin/stock_mgmt": {
+  "body": "9455518b6f",
+  "cache": "",
+  "len": 6137,
+  "location": "",
+  "status": 401,
+  "type": "text/html"
+ },
+ "anonymous GET /admin/stock_mgmt/data": {
+  "body": "88f9a1a576",
+  "cache": "",
+  "len": 6142,
   "location": "",
   "status": 401,
   "type": "text/html"
@@ -2367,6 +2463,30 @@
   "status": 401,
   "type": "application/json"
  },
+ "anonymous POST /admin/stock_mgmt/draft": {
+  "body": "ee2876c01a",
+  "cache": "no-store",
+  "len": 27,
+  "location": "",
+  "status": 401,
+  "type": "application/json"
+ },
+ "anonymous POST /admin/stock_mgmt/orders": {
+  "body": "ee2876c01a",
+  "cache": "no-store",
+  "len": 27,
+  "location": "",
+  "status": 401,
+  "type": "application/json"
+ },
+ "anonymous POST /admin/stock_mgmt/settings": {
+  "body": "ee2876c01a",
+  "cache": "no-store",
+  "len": 27,
+  "location": "",
+  "status": 401,
+  "type": "application/json"
+ },
  "anonymous POST /admin/system/categories/abbreviation": {
   "body": "d9f3b7324c",
   "cache": "no-store",
@@ -2616,6 +2736,22 @@
   "type": "application/json"
  },
  "dealer GET /admin/popup": {
+  "body": "9d21e23c8b",
+  "cache": "no-store",
+  "len": 34,
+  "location": "",
+  "status": 403,
+  "type": "application/json"
+ },
+ "dealer GET /admin/stock_mgmt": {
+  "body": "9d21e23c8b",
+  "cache": "no-store",
+  "len": 34,
+  "location": "",
+  "status": 403,
+  "type": "application/json"
+ },
+ "dealer GET /admin/stock_mgmt/data": {
   "body": "9d21e23c8b",
   "cache": "no-store",
   "len": 34,
@@ -3216,6 +3352,30 @@
   "type": "application/json"
  },
  "dealer POST /admin/set_all_customer_status": {
+  "body": "9d21e23c8b",
+  "cache": "no-store",
+  "len": 34,
+  "location": "",
+  "status": 403,
+  "type": "application/json"
+ },
+ "dealer POST /admin/stock_mgmt/draft": {
+  "body": "9d21e23c8b",
+  "cache": "no-store",
+  "len": 34,
+  "location": "",
+  "status": 403,
+  "type": "application/json"
+ },
+ "dealer POST /admin/stock_mgmt/orders": {
+  "body": "9d21e23c8b",
+  "cache": "no-store",
+  "len": 34,
+  "location": "",
+  "status": 403,
+  "type": "application/json"
+ },
+ "dealer POST /admin/stock_mgmt/settings": {
   "body": "9d21e23c8b",
   "cache": "no-store",
   "len": 34,

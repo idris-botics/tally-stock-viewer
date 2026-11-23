@@ -11,6 +11,7 @@ if _os.environ.get("FEEDER_MODE") != "1":
 from flask import Flask, jsonify, request, render_template, send_file, Response, session, redirect, url_for, g
 import hashlib
 import hmac
+import math
 import json
 import os
 import requests
@@ -6157,7 +6158,21 @@ def _capture_meta_set(conn, key, value):
 
 
 def _auto_receive_orders(events, conn=None):
-    """Filled in by the order tracker (Stock Management, Part B). Deliberately does nothing here."""
+    """Order tracker: when the stock of an item that has an open order goes UP, the oldest open order for it is marked
+    received (quantity = the actual rise). The tracker is a reminder, not accounting: a smaller rise than ordered still
+    counts. `events` are (item_key, item_name, qty_before, qty_after); runs inside the capture transaction."""
+    if conn is None:
+        return None
+    rises = {key: after - before for key, _name, before, after in events if after > before}
+    if not rises:
+        return None
+    received_at = _stock_now_utc().strftime("%Y-%m-%dT%H:%M:%S")
+    claimed = set()
+    for order_id, item_key in conn.execute("SELECT id, item_key FROM restock_orders WHERE status = 'ordered' ORDER BY ordered_at_utc, id").fetchall():
+        if item_key in rises and item_key not in claimed:
+            claimed.add(item_key)
+            conn.execute("UPDATE restock_orders SET status = 'received', received_at_utc = ?, qty_received = ? WHERE id = ?",
+                         (received_at, rises[item_key], order_id))
     return None
 
 
@@ -6241,7 +6256,10 @@ def _capture_stock_changes(item_stock_clean):
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 events,
             )
-            _auto_receive_orders([(e[1], e[2], e[3], e[4]) for e in events], conn)
+            try:
+                _auto_receive_orders([(e[1], e[2], e[3], e[4]) for e in events], conn)
+            except Exception:
+                logger.exception("Stock capture: marking orders received failed")   # the history itself is still saved
         if streak:
             _capture_meta_set(conn, "suspicious_push_streak", 0)
         _prune_stock_history(conn, day)
@@ -6358,6 +6376,735 @@ def _record_stock_interest(response):
     return response
 
 
+# ============================================================
+# STOCK MANAGEMENT, PART B -- the admin pages
+# ============================================================
+# One admin-only page (/admin/stock_mgmt) with five tabs, fed by ONE admin-only JSON route that returns at most 100
+# rows per answer, plus two POST routes for the order list / orders and one for the settings. Everything is computed
+# from the capture tables (stock_state, stock_events, car_interest_daily, search_miss_daily) with SQL aggregates and
+# from the hierarchy the app already keeps in memory -- the stock files are never re-read here.
+STOCK_MGMT_PAGE_SIZE = 100
+STOCK_MGMT_CACHE_SECONDS = 60
+STOCK_MGMT_CACHE_MAX = 50
+STOCK_MGMT_SALES_DAYS = 30
+STOCK_MGMT_MIN_HISTORY_DAYS = 7
+STOCK_MGMT_MAX_QTY = 100000
+STOCK_MGMT_MAX_NOTE = 200
+STOCK_MGMT_MAX_SEARCH = 80
+STOCK_MGMT_MAX_LINES = 2000
+STOCK_MGMT_TABS = ("needs", "order", "ordered", "slow", "asked")
+STOCK_MGMT_SETTING_LIMITS = {          # key -> (lowest, highest, default)
+    "low_days": (1, 365, 14),
+    "low_qty": (0, 1000, 2),
+    "order_cover_days": (1, 365, 30),
+    "asked_max_items": (0, 1000, 3),
+    "include_admin": (0, 1, 1),
+}
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+_STOCK_MGMT_LOCK = threading.Lock()          # guards the small result cache
+_STOCK_MGMT_WRITE_LOCK = threading.Lock()    # one order-list / order change at a time
+_stock_mgmt_cache = {}                       # key -> (monotonic time, payload); at most STOCK_MGMT_CACHE_MAX entries
+_stock_catalogue_cache = {"fingerprint": None, "index": None}
+
+
+class _StockMgmtError(Exception):
+    def __init__(self, message, status=400, **extra):
+        super().__init__(message)
+        self.status = status
+        self.extra = extra
+
+
+def _stock_mgmt_cache_clear():
+    with _STOCK_MGMT_LOCK:
+        _stock_mgmt_cache.clear()
+
+
+def _stock_mgmt_cached(key, compute):
+    now = time.monotonic()
+    with _STOCK_MGMT_LOCK:
+        hit = _stock_mgmt_cache.get(key)
+        if hit is not None and now - hit[0] < STOCK_MGMT_CACHE_SECONDS:
+            return hit[1]
+    payload = compute()
+    with _STOCK_MGMT_LOCK:
+        if len(_stock_mgmt_cache) >= STOCK_MGMT_CACHE_MAX and key not in _stock_mgmt_cache:
+            del _stock_mgmt_cache[min(_stock_mgmt_cache, key=lambda k: _stock_mgmt_cache[k][0])]
+        _stock_mgmt_cache[key] = (now, payload)
+    return payload
+
+
+def _parse_utc(text):
+    """'YYYY-MM-DDTHH:MM:SS' (naive, stored as UTC) -> aware UTC datetime, or None."""
+    try:
+        return datetime.strptime(str(text)[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ist_date(moment):
+    return (moment + timedelta(hours=5, minutes=30)).date()
+
+
+def _today_ist_date():
+    return _ist_date(_stock_now_utc())
+
+
+def _stock_window_days(started_utc):
+    """Days of history the selling speed is spread over: days since tracking began, at least 1 and at most 30."""
+    if started_utc is None:
+        return 1
+    return max(1, min(STOCK_MGMT_SALES_DAYS, (_today_ist_date() - _ist_date(started_utc)).days))
+
+
+def _stock_tracking_info(conn):
+    today = _today_ist_date()
+    info = {"stock_since": None, "stock_days": 0, "interest_since": None, "interest_days": 0}
+    for prefix, key in (("stock", "stock_tracking_started_at_utc"), ("interest", "interest_tracking_started_at_utc")):
+        started = _parse_utc(_capture_meta_get(conn, key))
+        if started is not None:
+            since = _ist_date(started)
+            info[f"{prefix}_since"] = since.isoformat()
+            info[f"{prefix}_days"] = max(0, (today - since).days)
+    days = info["stock_days"]
+    if info["stock_since"] is None:
+        info["banner"] = "Stock history has not started yet. It starts with the next stock update."
+    else:
+        info["banner"] = f"Stock history since {info['stock_since']} ({_plural(days, 'day')})."
+        if days < STOCK_MGMT_MIN_HISTORY_DAYS:
+            info["banner"] += " Still collecting data. Estimates get better each day."
+    if info["interest_since"] is None:
+        info["interest_banner"] = "Car interest tracking has not started yet."
+    else:
+        info["interest_banner"] = f"Tracking started on {info['interest_since']} ({_plural(info['interest_days'], 'day')} ago)."
+    return info
+
+
+def _stock_mgmt_settings(conn):
+    values = {key: spec[2] for key, spec in STOCK_MGMT_SETTING_LIMITS.items()}
+    for key, value in conn.execute("SELECT key, value FROM stock_mgmt_settings"):
+        spec = STOCK_MGMT_SETTING_LIMITS.get(key)
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if spec is not None and spec[0] <= number <= spec[1]:
+            values[key] = number
+    return values
+
+
+def _stock_whole(value, lowest, highest):
+    """A whole number in range, else None. True/False, 1.5 and text are refused."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if lowest <= value <= highest else None
+
+
+def _stock_date_text(value, allow_empty=False):
+    if value in (None, "") and allow_empty:
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise _StockMgmtError("The date must look like 2026-04-30")
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise _StockMgmtError("The date must look like 2026-04-30")
+    if parsed.year < 2020:
+        raise _StockMgmtError("The date must be 2020 or later")
+    return value
+
+
+def _stock_is_real_item(key):
+    """Hierarchy children that are real items: has a letter, and is not a total line."""
+    return bool(re.search(r"[A-Z]", key)) and not re.match(r"(GRAND )?TOTAL\b", key)
+
+
+def _stock_catalogue():
+    """{'cars': {car_key: (car_name, [item_key, ...])}, 'items': {item_key: [item_name, [car_key, ...]]}} built from
+    the hierarchy the app already holds in memory; rebuilt only when the hierarchy file changes."""
+    fingerprint = _file_fingerprint(MAIN_HIERARCHY_CACHE_JSON)
+    with _STOCK_MGMT_LOCK:
+        cached = _stock_catalogue_cache
+        if fingerprint is not None and cached["fingerprint"] == fingerprint and cached["index"] is not None:
+            return cached["index"]
+    cars, items = {}, {}
+    for entry in _load_main_hierarchy_payload():
+        parent = str(entry.get("parent") or "").strip()
+        car_key = _stock_item_key(parent)
+        if not car_key:
+            continue
+        seen = set()
+        for child in entry.get("children") or []:
+            name = str(child.get("item_name") or "").strip()
+            item_key = _stock_item_key(name)
+            if not item_key or item_key in seen or not _stock_is_real_item(item_key):
+                continue
+            seen.add(item_key)
+            items.setdefault(item_key, [name, []])[1].append(car_key)
+        cars[car_key] = (parent, sorted(seen))
+    index = {"cars": cars, "items": items}
+    with _STOCK_MGMT_LOCK:
+        _stock_catalogue_cache.update(fingerprint=fingerprint, index=index)
+    return index
+
+
+def _stock_state_map(conn):
+    return {row[0]: (row[1], row[2]) for row in conn.execute("SELECT item_key, item_name, qty FROM stock_state")}
+
+
+def _stock_open_orders(conn):
+    """{item_key: {'id', 'ordered_on'}} for the OLDEST open order of each item."""
+    found = {}
+    for order_id, item_key, ordered_at in conn.execute(
+            "SELECT id, item_key, ordered_at_utc FROM restock_orders WHERE status = 'ordered' ORDER BY ordered_at_utc, id"):
+        if item_key not in found:
+            moment = _parse_utc(ordered_at)
+            found[item_key] = {"id": order_id, "ordered_on": _ist_date(moment).isoformat() if moment else None}
+    return found
+
+
+def _stock_sales(conn):
+    """{item_key: units sold in the last 30 IST days}. Only decreases count; a restock is never a negative sale."""
+    return {row[0]: row[1] for row in conn.execute(
+        "SELECT item_key, SUM(qty_before - qty_after) FROM stock_events WHERE day_ist > ? AND qty_before > qty_after GROUP BY item_key",
+        (_ist_day_minus(STOCK_MGMT_SALES_DAYS),))}
+
+
+def _stock_suggested_qty(speed, qty_now, cover_days):
+    if speed > 0:
+        return max(1, int(math.ceil(speed * cover_days)) - qty_now)
+    return 1
+
+
+def _stock_days_left_text(value):
+    return None if value is None else int(math.floor(value + 0.5))
+
+
+def _stock_page(rows, page):
+    start = (page - 1) * STOCK_MGMT_PAGE_SIZE
+    return {"rows": rows[start:start + STOCK_MGMT_PAGE_SIZE], "total": len(rows), "page": page,
+            "more": start + STOCK_MGMT_PAGE_SIZE < len(rows)}
+
+
+def _stock_car_interest(conn, include_admin):
+    """{car_key: opens in the last 30 days}."""
+    roles = ("dealer", "admin") if include_admin else ("dealer",)
+    marks = ",".join("?" for _ in roles)
+    return {row[0]: row[1] for row in conn.execute(
+        f"SELECT car_key, SUM(opens) FROM car_interest_daily WHERE day_ist > ? AND role IN ({marks}) GROUP BY car_key",
+        (_ist_day_minus(30), *roles))}
+
+
+def _stock_tab_needs(conn, section, q, page, show_all):
+    settings = _stock_mgmt_settings(conn)
+    tracking = _stock_tracking_info(conn)
+    window = _stock_window_days(_parse_utc(_capture_meta_get(conn, "stock_tracking_started_at_utc")))
+    sold = _stock_sales(conn)
+    state = _stock_state_map(conn)
+    orders = _stock_open_orders(conn)
+    on_list = {row[0] for row in conn.execute("SELECT item_key FROM restock_draft")}
+    cover = settings["order_cover_days"]
+    query = _stock_item_key(q)
+    rows = []
+    if section == "low":
+        for key, (name, qty) in state.items():
+            if query and query not in key:
+                continue
+            speed = sold.get(key, 0) / window
+            days_left = qty / speed if speed > 0 else None
+            by_days = days_left is not None and tracking["stock_days"] >= STOCK_MGMT_MIN_HISTORY_DAYS and days_left <= settings["low_days"]
+            if not (by_days or qty <= settings["low_qty"]):
+                continue
+            rows.append((days_left if days_left is not None else float("inf"), qty, key, {
+                "item_key": key, "item_name": name, "qty": qty, "speed": round(speed, 1),
+                "days_left": _stock_days_left_text(days_left), "no_recent_sales": speed <= 0,
+                "open_order": orders.get(key), "on_order_list": key in on_list,
+                "suggested_qty": _stock_suggested_qty(speed, qty, cover)}))
+        rows.sort(key=lambda r: r[:3])
+    else:
+        catalogue = _stock_catalogue()
+        interest = _stock_car_interest(conn, bool(settings["include_admin"]))
+        names = {row[0]: row[1] for row in conn.execute("SELECT item_key, MAX(item_name) FROM stock_events GROUP BY item_key")}
+        if show_all:
+            candidates = set(catalogue["items"]) | set(names)
+        else:
+            candidates = set(names)
+            for car_key, opens in interest.items():
+                if opens > 0 and car_key in catalogue["cars"]:
+                    candidates.update(catalogue["cars"][car_key][1])
+        for key in candidates:
+            if key in state or (query and query not in key):
+                continue
+            entry = catalogue["items"].get(key)
+            name = entry[0] if entry else names.get(key) or key
+            speed = sold.get(key, 0) / window
+            asked = sum(interest.get(car, 0) for car in (entry[1] if entry else ()))
+            rows.append((-speed, -asked, key, {
+                "item_key": key, "item_name": name, "qty": 0, "speed": round(speed, 1), "asked": asked,
+                "open_order": orders.get(key), "on_order_list": key in on_list,
+                "suggested_qty": _stock_suggested_qty(speed, 0, cover)}))
+        rows.sort(key=lambda r: r[:3])
+    payload = _stock_page([r[3] for r in rows], page)
+    payload.update(tab="needs", section=section, settings=settings, tracking=tracking, show_all=bool(show_all))
+    return payload
+
+
+def _stock_group_name(key, name, catalogue, categories):
+    if key not in catalogue["items"]:
+        return "Other"
+    return categories.get(normalize_lookup_key(name)) or "No category yet"
+
+
+def _stock_order_text(groups):
+    today = _today_ist_date()
+    lines = [f"Order list - {today.day} {_MONTHS[today.month - 1]} {today.year}"]
+    for group in groups:
+        lines += ["", group["name"]]
+        for item in group["items"]:
+            lines.append(f"{item['item_name']} - {item['qty']}" + (f" ({item['note']})" if item["note"] else ""))
+    return "\n".join(lines)
+
+
+def _stock_tab_order(conn):
+    draft = conn.execute("SELECT item_key, item_name, qty, note FROM restock_draft ORDER BY item_name, item_key").fetchall()
+    catalogue = _stock_catalogue()
+    categories = db.get_categories_for_stock_items([row[1] for row in draft]) if draft else {}
+    orders = _stock_open_orders(conn)
+    grouped = {}
+    for key, name, qty, note in draft:
+        grouped.setdefault(_stock_group_name(key, name, catalogue, categories), []).append({
+            "item_key": key, "item_name": name, "qty": qty, "note": note or "", "has_open_order": key in orders})
+    special = ("No category yet", "Other")
+    order = sorted((g for g in grouped if g not in special), key=str.casefold) + [g for g in special if g in grouped]
+    groups = [{"name": g, "items": grouped[g]} for g in order]
+    return {"tab": "order", "groups": groups, "total_items": len(draft), "text": _stock_order_text(groups) if draft else "",
+            "tracking": _stock_tracking_info(conn), "can_undo": _stock_last_action(conn) is not None}
+
+
+def _stock_tab_ordered(conn, page):
+    today = _today_ist_date()
+    rows = []
+    for order_id, key, name, qty, ordered_at, expected, note in conn.execute(
+            "SELECT id, item_key, item_name, qty_ordered, ordered_at_utc, expected_date, note FROM restock_orders "
+            "WHERE status = 'ordered' ORDER BY ordered_at_utc, id"):
+        moment = _parse_utc(ordered_at)
+        ordered_on = _ist_date(moment) if moment else today
+        overdue = bool(expected) and expected < today.isoformat()
+        rows.append(((0 if overdue else 1, expected or "9999-12-31", ordered_at or "", order_id), {
+            "id": order_id, "item_key": key, "item_name": name, "qty_ordered": qty, "ordered_on": ordered_on.isoformat(),
+            "age_days": max(0, (today - ordered_on).days), "expected_date": expected, "overdue": overdue, "note": note or ""}))
+    rows.sort(key=lambda r: r[0])
+    cutoff = (_stock_now_utc() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S")
+    recent = [{"id": r[0], "item_name": r[1], "qty_ordered": r[2], "qty_received": r[3],
+               "received_on": _ist_date(_parse_utc(r[4])).isoformat() if _parse_utc(r[4]) else None}
+              for r in conn.execute(
+                  "SELECT id, item_name, qty_ordered, qty_received, received_at_utc FROM restock_orders "
+                  "WHERE status = 'received' AND received_at_utc >= ? ORDER BY received_at_utc DESC, id DESC LIMIT ?",
+                  (cutoff, STOCK_MGMT_PAGE_SIZE))]
+    payload = _stock_page([r[1] for r in rows], page)
+    payload.update(tab="ordered", open=payload.pop("rows"), recent=recent, tracking=_stock_tracking_info(conn),
+                   can_undo=_stock_last_action(conn) is not None)
+    return payload
+
+
+def _stock_tab_slow(conn, days, q, page):
+    tracking = _stock_tracking_info(conn)
+    payload = {"tab": "slow", "days": days, "tracking": tracking}
+    if tracking["stock_since"] is None or tracking["stock_days"] < days:
+        since = tracking["stock_since"]
+        if since is None:
+            payload["message"] = "Stock tracking has not started yet. This list will appear after it has run for %d days." % days
+        else:
+            ready = datetime.strptime(since, "%Y-%m-%d").date() + timedelta(days=days)
+            payload["message"] = f"Tracking only since {since} ({_plural(tracking['stock_days'], 'day')}). This list will appear after {ready.isoformat()}."
+        payload["insufficient_history"] = True
+        return payload
+    today = _today_ist_date()
+    started = datetime.strptime(tracking["stock_since"], "%Y-%m-%d").date()
+    last_decrease = {row[0]: row[1] for row in conn.execute(
+        "SELECT item_key, MAX(day_ist) FROM stock_events WHERE qty_before > qty_after GROUP BY item_key")}
+    last_arrival = {row[0]: row[1] for row in conn.execute(
+        "SELECT item_key, MAX(day_ist) FROM stock_events WHERE qty_before = 0 AND qty_after > 0 GROUP BY item_key")}
+    query = _stock_item_key(q)
+    rows = []
+    for key, (name, qty) in _stock_state_map(conn).items():
+        if query and query not in key:
+            continue
+        sitting_since = max(datetime.strptime(d, "%Y-%m-%d").date() for d in
+                            (last_decrease.get(key) or tracking["stock_since"], last_arrival.get(key) or tracking["stock_since"]))
+        sitting = (today - max(sitting_since, started)).days
+        if sitting >= days:
+            rows.append((-sitting, -qty, key, {"item_key": key, "item_name": name, "qty": qty,
+                                              "last_decrease": last_decrease.get(key), "days_sitting": sitting}))
+    rows.sort(key=lambda r: r[:3])
+    payload.update(_stock_page([r[3] for r in rows], page))
+    return payload
+
+
+def _stock_tab_asked(conn, block, q, page, car, max_items, include_admin, show_all):
+    settings = _stock_mgmt_settings(conn)
+    include_admin = settings["include_admin"] if include_admin is None else include_admin
+    max_items = settings["asked_max_items"] if max_items is None else max_items
+    tracking = _stock_tracking_info(conn)
+    cut30, cut7 = _ist_day_minus(30), _ist_day_minus(7)
+    if block == "misses":
+        terms = []
+        for term, dealer, admin in conn.execute(
+                "SELECT term, SUM(CASE WHEN role = 'dealer' THEN count ELSE 0 END), SUM(CASE WHEN role = 'admin' THEN count ELSE 0 END) "
+                "FROM search_miss_daily WHERE day_ist > ? GROUP BY term", (cut30,)):
+            total = dealer + (admin if include_admin else 0)
+            if total > 0:
+                terms.append((-total, term, {"term": term, "dealer": dealer, "admin": admin, "total": total}))
+        terms.sort(key=lambda r: r[:2])
+        payload = _stock_page([r[2] for r in terms], page)
+        payload["terms"] = payload.pop("rows")
+        payload.update(tab="asked", block="misses", tracking=tracking, settings=settings)
+        return payload
+    state = _stock_state_map(conn)
+    catalogue = _stock_catalogue()
+    if block == "car_items":
+        car_key = _stock_item_key(car)
+        entry = catalogue["cars"].get(car_key)
+        sold, orders, window = _stock_sales(conn), _stock_open_orders(conn), _stock_window_days(_parse_utc(_capture_meta_get(conn, "stock_tracking_started_at_utc")))
+        on_list = {row[0] for row in conn.execute("SELECT item_key FROM restock_draft")}
+        rows = []
+        for item_key in (entry[1] if entry else []):
+            if item_key in state:
+                continue
+            speed = sold.get(item_key, 0) / window
+            name = catalogue["items"][item_key][0]
+            rows.append((name, {"item_key": item_key, "item_name": name, "speed": round(speed, 1), "open_order": orders.get(item_key),
+                                "on_order_list": item_key in on_list,
+                                "suggested_qty": _stock_suggested_qty(speed, 0, settings["order_cover_days"])}))
+        rows.sort(key=lambda r: r[0])
+        payload = _stock_page([r[1] for r in rows], page)
+        payload["items"] = payload.pop("rows")
+        payload.update(tab="asked", block="car_items", car_key=car_key, tracking=tracking, settings=settings)
+        return payload
+    cars = []
+    for car_key, d7, d30, a7, a30, dealers in conn.execute(
+            "SELECT car_key, SUM(CASE WHEN role = 'dealer' AND day_ist > ? THEN opens ELSE 0 END), "
+            "SUM(CASE WHEN role = 'dealer' THEN opens ELSE 0 END), "
+            "SUM(CASE WHEN role = 'admin' AND day_ist > ? THEN opens ELSE 0 END), "
+            "SUM(CASE WHEN role = 'admin' THEN opens ELSE 0 END), "
+            "COUNT(DISTINCT CASE WHEN role = 'dealer' THEN user_id END) "
+            "FROM car_interest_daily WHERE day_ist > ? GROUP BY car_key", (cut7, cut7, cut30)):
+        total_7, total_30 = d7 + (a7 if include_admin else 0), d30 + (a30 if include_admin else 0)
+        if total_30 <= 0:
+            continue
+        entry = catalogue["cars"].get(car_key)
+        item_keys = entry[1] if entry else []
+        in_stock = sum(1 for key in item_keys if key in state)
+        if not show_all and in_stock > max_items:
+            continue
+        if q and _stock_item_key(q) not in car_key:
+            continue
+        cars.append((in_stock, -total_30, car_key, {
+            "car_key": car_key, "car_name": entry[0] if entry else car_key, "dealer_opens_7": d7, "dealer_opens_30": d30,
+            "admin_opens_7": a7, "admin_opens_30": a30, "total_7": total_7, "total_30": total_30, "dealers": dealers,
+            "in_stock": in_stock, "out_of_stock": len(item_keys) - in_stock}))
+    cars.sort(key=lambda r: r[:3])
+    payload = _stock_page([r[3] for r in cars], page)
+    payload["cars"] = payload.pop("rows")
+    payload.update(tab="asked", block="cars", tracking=tracking, settings=settings, max_items=max_items,
+                   include_admin=include_admin, show_all=bool(show_all))
+    return payload
+
+
+def _stock_mgmt_args():
+    """Validated query parameters of the data route."""
+    args = request.args
+    tab = args.get("tab", "")
+    if tab not in STOCK_MGMT_TABS:
+        raise _StockMgmtError("Unknown tab")
+    q = (args.get("q") or "").strip()
+    if len(q) > STOCK_MGMT_MAX_SEARCH:
+        raise _StockMgmtError(f"Search text can be {STOCK_MGMT_MAX_SEARCH} characters at most")
+    page = args.get("page", 1, type=int)
+    if page is None or page < 1 or page > 10000:
+        raise _StockMgmtError("Invalid page")
+    section = args.get("section", "low")
+    if section not in ("low", "out"):
+        raise _StockMgmtError("Unknown section")
+    days = args.get("days", 60, type=int)
+    if days not in (60, 90):
+        raise _StockMgmtError("Days must be 60 or 90")
+    block = args.get("block", "cars")
+    if block not in ("cars", "misses", "car_items"):
+        raise _StockMgmtError("Unknown block")
+    car = (args.get("car") or "").strip()
+    if len(car) > 200:
+        raise _StockMgmtError("Car name is too long")
+    max_items = args.get("max_items", None, type=int) if args.get("max_items") not in (None, "") else None
+    if max_items is not None and not 0 <= max_items <= 1000:
+        raise _StockMgmtError("max_items must be 0 to 1000")
+    include_admin = None
+    if args.get("include_admin") not in (None, ""):
+        include_admin = args.get("include_admin", type=int)
+        if include_admin not in (0, 1):
+            raise _StockMgmtError("include_admin must be 0 or 1")
+    show_all = 1 if args.get("show_all") in ("1", "true") else 0
+    return dict(tab=tab, q=q, page=page, section=section, days=days, block=block, car=car, max_items=max_items,
+                include_admin=include_admin, show_all=show_all)
+
+
+def _stock_mgmt_json_body():
+    body = request.get_json(silent=True) if request.is_json else None
+    if not isinstance(body, dict):
+        raise _StockMgmtError("Send the request as JSON")
+    return body
+
+
+def _stock_mgmt_failure(exc):
+    if isinstance(exc, _StockMgmtError):
+        return jsonify(dict({"error": str(exc)}, **exc.extra)), exc.status
+    logger.warning("stock management failed (%s)", type(exc).__name__)     # class name only: never item names or SQL
+    return jsonify({"error": "Something went wrong. Please try again."}), 500
+
+
+@app.route("/admin/stock_mgmt")
+@admin_required
+def stock_mgmt_page():
+    return render_template("stock_management.html")
+
+
+@app.route("/admin/stock_mgmt/data")
+@admin_required
+def stock_mgmt_data():
+    try:
+        params = _stock_mgmt_args()
+        key = (tuple(sorted(params.items(), key=lambda kv: kv[0])), get_data_versions()["data_version"])
+
+        def compute():
+            with db.get_connection() as conn:
+                tab = params["tab"]
+                if tab == "needs":
+                    return _stock_tab_needs(conn, params["section"], params["q"], params["page"], params["show_all"])
+                if tab == "order":
+                    return _stock_tab_order(conn)
+                if tab == "ordered":
+                    return _stock_tab_ordered(conn, params["page"])
+                if tab == "slow":
+                    return _stock_tab_slow(conn, params["days"], params["q"], params["page"])
+                return _stock_tab_asked(conn, params["block"], params["q"], params["page"], params["car"],
+                                        params["max_items"], params["include_admin"], params["show_all"])
+        return jsonify(_stock_mgmt_cached(key, compute))
+    except Exception as exc:
+        return _stock_mgmt_failure(exc)
+
+
+@app.route("/admin/stock_mgmt/settings", methods=["POST"])
+@admin_required
+def stock_mgmt_settings_save():
+    try:
+        body = _stock_mgmt_json_body()
+        clean = {}
+        for key, value in body.items():
+            spec = STOCK_MGMT_SETTING_LIMITS.get(key)
+            if spec is None:
+                raise _StockMgmtError("Unknown setting")
+            number = _stock_whole(value, spec[0], spec[1])
+            if number is None:
+                raise _StockMgmtError(f"{key} must be a whole number from {spec[0]} to {spec[1]}")
+            clean[key] = number
+        if not clean:
+            raise _StockMgmtError("Nothing to save")
+        with _STOCK_MGMT_WRITE_LOCK, db.get_connection() as conn:
+            conn.executemany(
+                "INSERT INTO stock_mgmt_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [(key, str(value)) for key, value in clean.items()])
+            settings = _stock_mgmt_settings(conn)
+        _stock_mgmt_cache_clear()
+        return jsonify({"ok": True, "settings": settings})
+    except Exception as exc:
+        return _stock_mgmt_failure(exc)
+
+
+def _stock_last_action(conn):
+    raw = conn.execute("SELECT value FROM stock_mgmt_settings WHERE key = 'last_action'").fetchone()
+    try:
+        return json.loads(raw[0]) if raw else None
+    except ValueError:
+        return None
+
+
+def _stock_set_last_action(conn, action):
+    if action is None:
+        conn.execute("DELETE FROM stock_mgmt_settings WHERE key = 'last_action'")
+    else:
+        conn.execute("INSERT INTO stock_mgmt_settings (key, value) VALUES ('last_action', ?) "
+                     "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (json.dumps(action),))
+
+
+def _stock_item_is_known(conn, key):
+    if key in _stock_catalogue()["items"]:
+        return True
+    return conn.execute("SELECT 1 FROM stock_state WHERE item_key = ? UNION SELECT 1 FROM stock_events WHERE item_key = ? LIMIT 1",
+                        (key, key)).fetchone() is not None
+
+
+def _stock_note(value):
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value.strip()) > STOCK_MGMT_MAX_NOTE:
+        raise _StockMgmtError(f"A note can be {STOCK_MGMT_MAX_NOTE} characters at most")
+    return value.strip()
+
+
+@app.route("/admin/stock_mgmt/draft", methods=["POST"])
+@admin_required
+def stock_mgmt_draft():
+    """Order list edits. {"action": "add"|"update"|"remove", ...}"""
+    try:
+        body = _stock_mgmt_json_body()
+        action = body.get("action")
+        if action not in ("add", "update", "remove"):
+            raise _StockMgmtError("Unknown action")
+        name = body.get("item_name") if action == "add" else body.get("item_key")
+        if not isinstance(name, str) or not name.strip() or len(name) > 300:
+            raise _StockMgmtError("Item name is missing")
+        key = _stock_item_key(name)
+        qty = None
+        if action == "add" or "qty" in body:
+            qty = _stock_whole(body.get("qty"), 1, STOCK_MGMT_MAX_QTY)
+            if qty is None:
+                raise _StockMgmtError(f"Quantity must be a whole number from 1 to {STOCK_MGMT_MAX_QTY}")
+        note = _stock_note(body.get("note"))
+        now_text = _stock_now_utc().strftime("%Y-%m-%dT%H:%M:%S")
+        with _STOCK_MGMT_WRITE_LOCK, db.get_connection() as conn:
+            if action == "add":
+                if not _stock_item_is_known(conn, key):
+                    raise _StockMgmtError("That item is not in the catalogue")
+                entry = _stock_catalogue()["items"].get(key)
+                state = conn.execute("SELECT item_name FROM stock_state WHERE item_key = ?", (key,)).fetchone()
+                canonical = entry[0] if entry else (state[0] if state else name.strip())
+                conn.execute(
+                    "INSERT INTO restock_draft (item_key, item_name, qty, note, added_at_utc) VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(item_key) DO UPDATE SET item_name = excluded.item_name, qty = excluded.qty, note = excluded.note",
+                    (key, canonical, qty, note, now_text))
+            elif action == "update":
+                if qty is None and note is None:
+                    raise _StockMgmtError("Nothing to change")
+                if conn.execute("SELECT 1 FROM restock_draft WHERE item_key = ?", (key,)).fetchone() is None:
+                    raise _StockMgmtError("That item is not on the order list", 404)
+                if qty is not None:
+                    conn.execute("UPDATE restock_draft SET qty = ? WHERE item_key = ?", (qty, key))
+                if note is not None:
+                    conn.execute("UPDATE restock_draft SET note = ? WHERE item_key = ?", (note, key))
+            else:
+                conn.execute("DELETE FROM restock_draft WHERE item_key = ?", (key,))
+        _stock_mgmt_cache_clear()
+        return jsonify({"ok": True})
+    except Exception as exc:
+        return _stock_mgmt_failure(exc)
+
+
+def _stock_order_row(conn, order_id):
+    row = conn.execute("SELECT id, status, qty_ordered, expected_date FROM restock_orders WHERE id = ?", (order_id,)).fetchone()
+    if row is None:
+        raise _StockMgmtError("That order was not found", 404)
+    return row
+
+
+def _stock_place_orders(conn, body):
+    expected = _stock_date_text(body.get("expected_date"), allow_empty=True)
+    if body.get("all") is True:
+        lines = conn.execute("SELECT item_key, item_name, qty, note, added_at_utc FROM restock_draft ORDER BY item_name").fetchall()
+    else:
+        keys = body.get("item_keys")
+        if not isinstance(keys, list) or not keys or len(keys) > STOCK_MGMT_MAX_LINES or not all(isinstance(k, str) for k in keys):
+            raise _StockMgmtError("Choose the items to order")
+        wanted = {_stock_item_key(k) for k in keys}
+        lines = [row for row in conn.execute("SELECT item_key, item_name, qty, note, added_at_utc FROM restock_draft ORDER BY item_name")
+                 if row[0] in wanted]
+    if not lines:
+        raise _StockMgmtError("Nothing to order")
+    open_orders = _stock_open_orders(conn)
+    duplicates = [row[1] for row in lines if row[0] in open_orders]
+    if duplicates and body.get("confirm_duplicates") is not True:
+        raise _StockMgmtError("Some of these items already have an open order", 409, needs_confirm=True, duplicates=duplicates[:50])
+    now_text = _stock_now_utc().strftime("%Y-%m-%dT%H:%M:%S")
+    order_ids = []
+    for key, name, qty, note, _added in lines:
+        cursor = conn.execute(
+            "INSERT INTO restock_orders (item_key, item_name, qty_ordered, ordered_at_utc, expected_date, status, note) "
+            "VALUES (?, ?, ?, ?, ?, 'ordered', ?)", (key, name, qty, now_text, expected, note))
+        order_ids.append(cursor.lastrowid)
+    conn.executemany("DELETE FROM restock_draft WHERE item_key = ?", [(row[0],) for row in lines])
+    _stock_set_last_action(conn, {"type": "place", "order_ids": order_ids, "lines": [list(row) for row in lines]})
+    return {"ordered": len(order_ids)}
+
+
+def _stock_undo(conn):
+    action = _stock_last_action(conn)
+    if action is None:
+        raise _StockMgmtError("There is nothing to undo", 409)
+    kind = action.get("type")
+    if kind == "place":
+        lines = {row[0]: row for row in action.get("lines", [])}
+        for order_id in action.get("order_ids", []):
+            row = conn.execute("SELECT item_key, status FROM restock_orders WHERE id = ?", (order_id,)).fetchone()
+            if row is None or row[1] != "ordered":
+                continue                                   # already received or changed since: leave it alone
+            conn.execute("DELETE FROM restock_orders WHERE id = ?", (order_id,))
+            line = lines.get(row[0])
+            if line:
+                conn.execute("INSERT OR REPLACE INTO restock_draft (item_key, item_name, qty, note, added_at_utc) VALUES (?, ?, ?, ?, ?)",
+                             (line[0], line[1], line[2], line[3], line[4]))
+    elif kind in ("receive", "cancel"):
+        conn.execute("UPDATE restock_orders SET status = 'ordered', received_at_utc = NULL, qty_received = NULL WHERE id = ?", (action["id"],))
+    elif kind == "expected":
+        conn.execute("UPDATE restock_orders SET expected_date = ? WHERE id = ?", (action.get("prev"), action["id"]))
+    _stock_set_last_action(conn, None)
+    return {"undone": kind}
+
+
+@app.route("/admin/stock_mgmt/orders", methods=["POST"])
+@admin_required
+def stock_mgmt_orders():
+    """Orders. {"action": "place"|"receive"|"cancel"|"expected"|"undo", ...}"""
+    try:
+        body = _stock_mgmt_json_body()
+        action = body.get("action")
+        if action not in ("place", "receive", "cancel", "expected", "undo"):
+            raise _StockMgmtError("Unknown action")
+        order_id = qty_received = expected = None
+        if action in ("receive", "cancel", "expected"):
+            order_id = _stock_whole(body.get("id"), 1, 2 ** 31)
+            if order_id is None:
+                raise _StockMgmtError("Order number is missing")
+        if action == "receive" and body.get("qty_received") is not None:
+            qty_received = _stock_whole(body.get("qty_received"), 1, STOCK_MGMT_MAX_QTY)
+            if qty_received is None:
+                raise _StockMgmtError(f"Quantity must be a whole number from 1 to {STOCK_MGMT_MAX_QTY}")
+        if action == "expected":
+            expected = _stock_date_text(body.get("expected_date"), allow_empty=True)
+        with _STOCK_MGMT_WRITE_LOCK, db.get_connection() as conn:
+            if action == "place":
+                result = _stock_place_orders(conn, body)
+            elif action == "undo":
+                result = _stock_undo(conn)
+            else:
+                _id, status, qty_ordered, previous_expected = _stock_order_row(conn, order_id)
+                if status != "ordered":
+                    raise _StockMgmtError(f"That order is already {status}", 409)
+                if action == "receive":
+                    conn.execute("UPDATE restock_orders SET status = 'received', received_at_utc = ?, qty_received = ? WHERE id = ?",
+                                 (_stock_now_utc().strftime("%Y-%m-%dT%H:%M:%S"), qty_received or qty_ordered, order_id))
+                    _stock_set_last_action(conn, {"type": "receive", "id": order_id})
+                elif action == "cancel":
+                    conn.execute("UPDATE restock_orders SET status = 'cancelled' WHERE id = ?", (order_id,))
+                    _stock_set_last_action(conn, {"type": "cancel", "id": order_id})
+                else:
+                    conn.execute("UPDATE restock_orders SET expected_date = ? WHERE id = ?", (expected, order_id))
+                    _stock_set_last_action(conn, {"type": "expected", "id": order_id, "prev": previous_expected})
+                result = {}
+        _stock_mgmt_cache_clear()
+        return jsonify(dict({"ok": True}, **result))
+    except Exception as exc:
+        return _stock_mgmt_failure(exc)
+
+
 @app.route("/admin/intake/sync_data", methods=["POST"])
 def intake_sync_data():
     expected_token = Config.INTAKE_SYNC_TOKEN
@@ -6435,6 +7182,7 @@ def intake_sync_data():
         if Config.DISABLE_TALLY_SCHEDULING:
             try:
                 _capture_stock_changes(item_stock)
+                _stock_mgmt_cache_clear()
             except Exception:
                 logger.exception("Stock capture failed")
     finally:

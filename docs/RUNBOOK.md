@@ -176,3 +176,31 @@ If a golden changes *on purpose*, run `python tests/check_all.py --update`, **re
 * **Do not set `BACKUP_MAX_DELETIONS`** and forget it.
 * **Do not judge a restart by memory alone.** A fresh start uses about 120 MB; a busy site uses 240-330 MB. Compare with the same site's earlier readings.
 * **Do not change library versions casually** (`requirements.txt` is pinned on purpose for Render; the shop PC uses the separate, loose `requirements-feeder.txt`). Change them deliberately, run the tests, deploy alone, and watch the logs.
+
+---
+
+## 13. Stock Management (admin only)
+
+**Where:** More menu -> **Stock Management**. Admins only (the page and every route behind it refuse dealers and visitors who are not logged in). Written for use on a phone: big text, big buttons.
+
+**How it learns.** Nothing is typed in by hand. Every time the feeder pushes stock, the site compares it with the previous push and writes down what changed (a sale, a restock, an item that sold out, an item that came back). Stock only lists items that are in stock, so an item missing from a push means 0. It also counts how often each car is opened by dealers and by admins, and which searches found no car at all. This started the day the capture release went live, so **on day 1 the pages show little; the estimates get better each day and are reasonable after about 7 days.** A banner at the top of every tab says since when history exists.
+
+**The five tabs**
+
+| Tab | What it shows |
+|---|---|
+| Needs restocking | *Running low*: in stock but (selling fast enough to run out within the "days left" setting, once there are 7 days of history) or at/below the "low quantity" setting. *Out of stock*: items at 0 that sold before or belong to a car dealers opened; the switch lists the whole catalogue. Each row has **Add to order list** with a suggested quantity (enough for the "order cover days" setting). |
+| Order list | What you plan to order, grouped by category. **Copy as text** (for WhatsApp), **Print**, **Mark all/ticked as ordered** (with an optional expected date). |
+| Ordered | Open orders with age, expected date and an **Overdue** badge; mark received, cancel, change the date, undo the last action. An order is marked **received by itself** when the stock of that item goes up. |
+| Slow stock | In stock but nothing sold for 60 or 90 days. Shown only once history is at least that long. |
+| Asked for | Cars dealers (and admins, switchable) opened that have few items in stock, plus searches that found no car. Counts only, never who. |
+
+**Settings** (top of *Needs restocking*, and the switches on *Asked for*): days-left warning (default 14), low quantity (2), order cover days (30), max items in stock for *Asked for* (3), include admin opens (on). They are saved on the site.
+
+**Selling speed** is the units that left stock in the last 30 days (restocks never count) divided by the days of history (1 to 30). "Days left" = quantity / speed, always labelled an estimate.
+
+**Safety.** A feeder push where 15% or more of the items (and at least 50) disappear at once is treated as a glitch: nothing is recorded, and only if the same picture arrives three pushes in a row (about 9 minutes) is it accepted as the new baseline, without writing sales. A failure while recording history is logged (`Stock capture failed`) and never changes the answer to the feeder or undoes a push.
+
+**Backups.** All of this lives in new tables inside the normal database (`mappings.db`), so the nightly backup and the System panel download include it automatically. Old rows are cleaned once a day (stock changes after 400 days, interest after 180).
+
+**Training Mode** lists cars dealers open most first (control: *Sort by*, with *Original order* as the alternative).
