@@ -38,7 +38,7 @@ PAYLOAD = {
 }
 INTAKE_HEADERS = {"X-Intake-Token": "tok123"}
 
-_state = {"app": None, "db": None, "users": None}
+_state = {"app": None, "db": None, "users": None, "pristine": None}
 
 
 def bootstrap():
@@ -64,7 +64,15 @@ def bootstrap():
     db.publish_banner("fixture banner")
     _state.update(app=app_module, db=db, users={
         "admin": db.authenticate_user("admin", "idris123"), "dealer": db.authenticate_user("star", "111")})
+    import tempfile   # outside the code folder: other tests count the files they find under it
+    _state["pristine"] = snapshot_state(tempfile.mkdtemp(prefix="state_pristine_"))   # exactly what bootstrap() made
     return app_module, db
+
+
+def pristine_snapshot():
+    """Folder holding the data/ and database state right after bootstrap(); pass it to restore_state()."""
+    bootstrap()
+    return _state["pristine"]
 
 
 def data_dir():
@@ -87,8 +95,8 @@ def _copy_db(src_path, dst_path):
         src.close()
 
 
-def snapshot_state():
-    dest = os.path.join(ROOT, ".state_snapshot")
+def snapshot_state(name=".state_snapshot"):
+    dest = os.path.join(ROOT, name)
     shutil.rmtree(dest, ignore_errors=True)
     os.makedirs(dest)
     for folder, _dirs, names in os.walk(data_dir()):
@@ -186,7 +194,7 @@ _MASKS = [
     (re.compile(r"\b[0-9a-f]{12}\b"), "<ver>"),
     (re.compile(r"[0-9a-f]{20,}"), "<hex>"),
     (re.compile(r"\b\d{10,}\b"), "<epoch>"),
-    (re.compile(r'"date": "\d{4}-\d\d-\d\d"'), '"date": "<day>"'),   # the activity chart lists the last N calendar days
+    (re.compile(r'"(date|as_of|first_day|last_day|week)": "\d{4}-\d\d-\d\d"'), r'"\1": "<day>"'),   # the activity chart lists the last N calendar days; also as_of/first_day/last_day/week
 ]
 SHAPE_ONLY_PREFIXES = ("/admin/system/",)   # live numbers / log lines: snapshot only the structure
 

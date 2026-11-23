@@ -5,16 +5,21 @@
  * every route, with every method, requested as anonymous / dealer / locked admin / unlocked admin
 Update the goldens deliberately with:  python tests/check_all.py --update
 """
+import contextlib
 import glob
 import os
 import re
 import unittest
 
 import copy
+from datetime import datetime, timezone
+from unittest import mock
 
 from tests import support
 from tests.support import ROOT, ROLES
 
+import activity_insights
+import activity_tiers
 import cloud_backup
 
 # cloud_backup keeps run state in module globals; other test modules (fake backup runs) change it. Capture the
@@ -26,6 +31,32 @@ SAMPLE_QUERY = {"designs": {"car": "ALTO"}, "search.search_cars": {"q": "a"}, "g
                 "search.get_stock_items_for_car": {"car": "ALTO"}, "get_stock_image": {"stock_item": "ALTO 7D MAT BLACK"},
                 "train": {"car": "ALTO"}, "get_current_mapping_image": {"stock_item": "ALTO 7D MAT BLACK"},
                 "search_all_stock_items": {"q": "alto"}, "admin_user_activity_stats": {"days": "7"}}
+
+
+# The usage routes build their day lists and labels from "now". Freeze it so the golden never depends on the day it runs.
+# Change this instant to any other day and the snapshot must still pass.
+FROZEN_NOW_UTC = datetime(2026, 1, 15, 6, 30, 0)
+
+
+class _FrozenDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        if tz is None:
+            return datetime.now()   # naive local time is only used for heartbeat ages (shape-only routes)
+        return FROZEN_NOW_UTC.replace(tzinfo=timezone.utc).astimezone(tz)
+
+
+def frozen_clock():
+    import app as app_module
+    patches = [mock.patch.object(app_module, "datetime", _FrozenDatetime),
+               mock.patch.object(activity_insights, "datetime", _FrozenDatetime),
+               mock.patch.object(activity_tiers, "_utc_now", lambda: FROZEN_NOW_UTC),
+               # the in-memory feeder heartbeat ages while other modules run; keep it "just pushed"
+               mock.patch.object(app_module, "FEEDER_LAST_SEEN_AT", datetime.now())]
+    stack = contextlib.ExitStack()
+    for patch in patches:
+        stack.enter_context(patch)
+    return stack
 
 
 def concrete_url(rule, ids):
@@ -110,6 +141,7 @@ class RouteSnapshot(unittest.TestCase):
 
     def test_every_route_every_role(self):
         app_module, db = support.bootstrap()
+        support.restore_state(support.pristine_snapshot())   # start from what bootstrap() made, whatever ran before us
         image_id = db.get_all_images()[0]["id"]
         ids = {"image_id": image_id, "user_id": support._state["users"]["dealer"]["id"], "report_id": 1, "version": 1,
                "name": db.get_all_categories()[0]["name"].replace(" ", "%20"), "filename": "shared.css"}
@@ -117,7 +149,7 @@ class RouteSnapshot(unittest.TestCase):
         self.reset_shared_state()
         results = {}
         try:
-            with support.blocked_side_effects():
+            with support.blocked_side_effects(), frozen_clock():
                 for rule in sorted(app_module.app.url_map.iter_rules(), key=lambda r: (r.rule, r.endpoint)):
                     path = concrete_url(rule, ids)
                     for method in sorted(rule.methods - {"HEAD", "OPTIONS"}):
