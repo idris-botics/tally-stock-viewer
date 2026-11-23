@@ -189,7 +189,7 @@ If a golden changes *on purpose*, run `python tests/check_all.py --update`, **re
 
 | Tab | What it shows |
 |---|---|
-| Needs restocking | *Running low*: in stock but (selling fast enough to run out within the "days left" setting, once there are 7 days of history) or at/below the "low quantity" setting. *Out of stock*: items at 0 that sold before or belong to a car dealers opened; the switch lists the whole catalogue. Each row has **Add to order list** with a suggested quantity (enough for the "order cover days" setting). |
+| Needs restocking | *Running low*: in stock but (selling fast enough to run out within the "days left" setting, once there are 7 days of history) or at/below the "low quantity" setting. *Sold out*: items that were in stock since tracking began and are now at 0 (items never seen in stock are not listed, otherwise every unstocked design would show). Each row has **Add to order list** with a suggested quantity (enough for the "order cover days" setting). |
 | Order list | What you plan to order, grouped by category. **Copy as text** (for WhatsApp), **Print**, **Mark all/ticked as ordered** (with an optional expected date). |
 | Ordered | Open orders with age, expected date and an **Overdue** badge; mark received, cancel, change the date, undo the last action. An order is marked **received by itself** when the stock of that item goes up. |
 | Slow stock | In stock but nothing sold for 60 or 90 days. Shown only once history is at least that long. |
