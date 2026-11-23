@@ -2024,7 +2024,8 @@ def _save_item_stock_data(deduped):
         # ever seeing a torn/empty file.
         _atomic_json_write(ITEM_STOCK_CACHE_JSON, deduped)
     except Exception:
-        pass
+        logger.exception("Could not save the item stock list")
+        raise
 
     # Cloud mode is JSON-only (see the module docstring / the memory-diet
     # investigation this was added for): nothing on a cloud instance ever
@@ -2463,9 +2464,22 @@ def _atomic_json_write(path, data, retries=10, retry_delay=0.05):
     (in the same testing, never more than 7 of these 10 attempts) instead
     of either corrupting the file (an in-place write) or silently losing
     the update (swallowing the PermissionError outright)."""
+    temp_path = _write_json_temp(path, data)
+    _commit_json(temp_path, path, retries=retries, retry_delay=retry_delay)
+
+
+def _write_json_temp(path, data):
+    """First half of _atomic_json_write(): writes `data` to <path>.tmp and returns that temp path.
+    Nothing at `path` changes yet."""
     temp_path = f"{path}.tmp"
     with open(temp_path, "w", encoding="utf-8") as handle:
         json.dump(data, handle, ensure_ascii=False)
+    return temp_path
+
+
+def _commit_json(temp_path, path, retries=10, retry_delay=0.05):
+    """Second half of _atomic_json_write(): moves the finished temp file over `path` (with the Windows
+    retry loop described above) and tells the data-version fingerprint that the file changed."""
     for attempt in range(retries):
         try:
             os.replace(temp_path, path)
@@ -6002,6 +6016,70 @@ def _intake_plausibility_error(clean, force=False):
     return None
 
 
+def _apply_intake_files_as_one_unit(car_master, main_hierarchy, item_stock):
+    """Cloud-mode apply of a validated push: afterwards the three JSON caches are all new and loaded, or all as
+    they were before and the error is re-raised (the caller answers 500).
+
+    Order: write the car and stock temp files; copy the three current files to <name>.prev; replace the car file;
+    build the hierarchy from the car list now on disk (that is what the normal write path does, and the car range
+    filter lives in _load_car_groups_from_cache_or_excel) and write and replace it; replace the stock file; reload.
+    A failure anywhere puts every replaced file back from its .prev copy (or removes a file that did not exist
+    before) and reloads the previous data. Called with _INTAKE_APPLY_LOCK held."""
+    paths = (CAR_MASTER_CACHE_JSON, MAIN_HIERARCHY_CACHE_JSON, ITEM_STOCK_CACHE_JSON)
+    existed = {path: os.path.isfile(path) for path in paths}
+    temps, prevs, replaced = [], {}, []
+
+    def commit(temp_path, path):
+        replaced.append(path)               # recorded first: a failed replace is restored from its .prev copy, which is identical
+        _commit_json(temp_path, path)
+        temps.remove(temp_path)
+
+    try:
+        for path, data in ((CAR_MASTER_CACHE_JSON, car_master), (ITEM_STOCK_CACHE_JSON, item_stock)):
+            temps.append(_write_json_temp(path, data))
+        car_temp, stock_temp = temps
+        for path in paths:
+            if existed[path]:
+                shutil.copy2(path, path + ".prev")
+                prevs[path] = path + ".prev"
+        commit(car_temp, CAR_MASTER_CACHE_JSON)
+        hierarchy_temp = _write_json_temp(MAIN_HIERARCHY_CACHE_JSON, _build_main_hierarchy_structure(main_hierarchy))
+        temps.append(hierarchy_temp)
+        commit(hierarchy_temp, MAIN_HIERARCHY_CACHE_JSON)
+        commit(stock_temp, ITEM_STOCK_CACHE_JSON)
+        load_data(refresh_first=False)
+    except Exception:
+        for path in replaced:
+            try:
+                if path in prevs:
+                    for attempt in range(10):      # same Windows retry as _commit_json
+                        try:
+                            os.replace(prevs[path], path)
+                            del prevs[path]
+                            break
+                        except PermissionError:
+                            if attempt == 9:
+                                raise              # the .prev copy stays on disk so the data can still be recovered by hand
+                            time.sleep(0.05)
+                elif not existed[path] and os.path.isfile(path):
+                    os.remove(path)
+                _note_json_written(path)
+            except Exception:
+                logger.exception("Cloud intake: could not put %s back", os.path.basename(path))
+        if replaced:
+            try:
+                load_data(refresh_first=False)
+            except Exception:
+                logger.exception("Cloud intake: reload after restoring the previous files failed")
+        raise
+    finally:
+        for leftover in temps + list(prevs.values()):
+            try:
+                os.remove(leftover)
+            except OSError:
+                pass
+
+
 @app.route("/admin/intake/sync_data", methods=["POST"])
 def intake_sync_data():
     expected_token = Config.INTAKE_SYNC_TOKEN
@@ -6059,13 +6137,16 @@ def intake_sync_data():
         try:
             # Reuses the exact same write paths a local Tally-sourced refresh
             # uses -- this data just came from a POST body instead of a fetch.
-            save_car_master_to_file(car_master)
-            save_main_hierarchy_to_file(main_hierarchy)
-            _save_item_stock_data(item_stock)
-            load_data(refresh_first=False)
-        except Exception as exc:
+            if Config.DISABLE_TALLY_SCHEDULING:
+                _apply_intake_files_as_one_unit(car_master, main_hierarchy, item_stock)
+            else:
+                save_car_master_to_file(car_master)
+                save_main_hierarchy_to_file(main_hierarchy)
+                _save_item_stock_data(item_stock)
+                load_data(refresh_first=False)
+        except Exception:
             logger.exception("Cloud intake sync_data failed to apply pushed data")
-            return jsonify({"error": f"Failed to apply pushed data: {exc}"}), 500
+            return jsonify({"error": "Failed to apply pushed data. See the server log."}), 500
         finally:
             with _VERSION_LOCK:
                 _feeder_hold = False
