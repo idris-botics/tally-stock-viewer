@@ -185,7 +185,7 @@ If a golden changes *on purpose*, run `python tests/check_all.py --update`, **re
 
 **How it learns.** Nothing is typed in by hand. Every time the feeder pushes stock, the site compares it with the previous push and writes down what changed (a sale, a restock, an item that sold out, an item that came back). Stock only lists items that are in stock, so an item missing from a push means 0. It also counts how often each car is opened by dealers and by admins, and which searches found no car at all. This started the day the capture release went live, so **on day 1 the pages show little; the estimates get better each day and are reasonable after about 7 days.** A banner at the top of every tab says since when history exists.
 
-**The five tabs**
+**The four tabs**
 
 | Tab | What it shows |
 |---|---|
@@ -193,9 +193,8 @@ If a golden changes *on purpose*, run `python tests/check_all.py --update`, **re
 | Order list | What you plan to order, grouped by category. **Copy as text** (for WhatsApp), **Print**, **Mark all/ticked as ordered** (with an optional expected date). |
 | Ordered | Open orders with age, expected date and an **Overdue** badge; mark received, cancel, change the date, undo the last action. An order is marked **received by itself** when the stock of that item goes up. |
 | Slow stock | In stock but nothing sold for 60 or 90 days. Shown only once history is at least that long. |
-| Asked for | Cars dealers (and admins, switchable) opened that have few items in stock, plus searches that found no car. Counts only, never who. |
 
-**Settings** (top of *Needs restocking*, and the switches on *Asked for*): days-left warning (default 14), low quantity (2), order cover days (30), max items in stock for *Asked for* (3), include admin opens (on). They are saved on the site.
+**Settings** (top of *Needs restocking*): days-left warning (default 14), low quantity (2), order cover days (30). They are saved on the site. (A hidden "include admin opens" setting also decides whether admin opens count when Training Mode orders cars.)
 
 **Selling speed** is the units that left stock in the last 30 days (restocks never count) divided by the days of history (1 to 30). "Days left" = quantity / speed, always labelled an estimate.
 

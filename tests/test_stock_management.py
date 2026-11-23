@@ -608,8 +608,9 @@ class AdminOnly(StockMgmtBase):
         response = self.admin.get(BASE)
         self.assertEqual(response.status_code, 200)
         text = response.get_data(as_text=True)
-        for tab in ("Needs restocking", "Order list", "Ordered", "Slow stock", "Asked for"):
+        for tab in ("Needs restocking", "Order list", "Ordered", "Slow stock"):
             self.assertIn(tab, text)
+        self.assertNotIn("Asked for", text)                          # the owner dropped that tab from the page
         self.assertNotIn("setInterval", text)                        # no new polling timers
 
     def test_data_route_rejects_unknown_tabs(self):
