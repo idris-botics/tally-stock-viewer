@@ -5961,8 +5961,8 @@ def _validate_intake_payload(payload):
         clean_row = dict(row)
         if "qty" in row and row["qty"] != "":
             qty = whole_number(row["qty"])
-            if qty is None or qty < 0:
-                return None, f"main_hierarchy row {index}: qty must be a whole number >= 0"
+            if qty is None:
+                return None, f"main_hierarchy row {index}: qty must be a whole number"
             clean_row["qty"] = qty
         clean_hierarchy.append(clean_row)
 
@@ -5974,8 +5974,8 @@ def _validate_intake_payload(payload):
         if not isinstance(row, dict) or not isinstance(row.get("item_name"), str) or not row["item_name"].strip():
             return None, f"item_stock row {index}: item_name must be a non-empty string"
         qty = whole_number(row.get("qty"))
-        if qty is None or qty < 0:
-            return None, f"item_stock row {index}: qty must be a whole number >= 0"
+        if qty is None:
+            return None, f"item_stock row {index}: qty must be a whole number"
         clean_row = dict(row)
         clean_row["qty"] = qty
         clean_stock.append(clean_row)
