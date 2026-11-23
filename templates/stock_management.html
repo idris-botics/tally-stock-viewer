@@ -161,6 +161,13 @@
     </div>
     <div id="banner" class="notice info no-print" role="status"></div>
     <div class="panel no-print"><div id="panel"></div></div>
+    <details class="note no-print" id="salesBox" title="What the shop has sent from Tally about sales. Open it to see the latest status.">
+        <summary>Sales data</summary>
+        <div style="padding:0 14px 14px">
+            <div id="salesBody" class="muted">No sales data received yet.</div>
+            <div class="actions"><button type="button" id="salesReset" class="secondary" style="display:none" title="Forget which Tally company the sales data belongs to. The data stays; the next sales push sets a new company.">Reset company pin</button></div>
+        </div>
+    </details>
     <div id="printSheet"></div>
 </div>
 <script>
@@ -195,8 +202,8 @@
         return Object.keys(params).filter(function (k) { return params[k] !== "" && params[k] !== null && params[k] !== undefined; })
             .map(function (k) { return encodeURIComponent(k) + "=" + encodeURIComponent(params[k]); }).join("&");
     }
-    async function getData(params) {
-        var response = await fetch(BASE + "/data?" + qs(params), { cache: "no-store", credentials: "same-origin" });
+    async function getData(params, path) {
+        var response = await fetch(BASE + (path || "/data") + "?" + qs(params), { cache: "no-store", credentials: "same-origin" });
         var data = {};
         try { data = await response.json(); } catch (e) { data = {}; }
         if (!response.ok) { throw new Error(data.error || "Could not load. Please try again."); }
@@ -579,6 +586,34 @@
         parts.push(el("p", { class: "fineprint", text: "Estimates only. A quiet item may simply be seasonal or kept for a regular customer. Think before you discount or stop reordering." }));
         panel.replaceChildren.apply(panel, parts);
     }
+
+    // ---------------- sales data box
+    async function loadSales() {
+        var body = document.getElementById("salesBody"), reset = document.getElementById("salesReset");
+        try {
+            var data = await getData({}, "/sales_status");
+            if (!data.has_data) {
+                body.textContent = data.company_pin ? "The shop has registered a Tally company but no sales lines are stored." : "No sales data received yet.";
+            } else {
+                var months = data.months.map(function (m) { return el("tr", {}, [el("td", { text: m.month }), el("td", { text: String(m.vouchers) }), el("td", { text: String(m.sold) }), el("td", { text: String(m.returned) }), el("td", { text: String(m.net) })]); });
+                body.replaceChildren(
+                    el("div", { text: "Last update " + (data.last_sync_ist || "unknown") + " (covering " + when(data.last_from) + " to " + when(data.last_to) + ")." }),
+                    el("div", { text: "Days stored: " + when(data.first_day) + " to " + when(data.last_day) + ". " + data.total_lines + " lines, " + data.vouchers + " sales slips, " + data.items + " designs." }),
+                    el("table", { style: "margin-top:8px;border-collapse:collapse;font-size:13px", title: "Units sold, returned and net, by month" }, [
+                        el("tr", {}, ["Month", "Slips", "Sold", "Returned", "Net"].map(function (h) { return el("th", { text: h, style: "text-align:left;padding:2px 10px 2px 0" }); }))].concat(months)),
+                    data.unmatched_count ? el("div", { class: "meta", title: "Sold design names that match no catalogue or stock item. These cannot be linked to a car.",
+                        text: data.unmatched_count + " sold design" + (data.unmatched_count === 1 ? "" : "s") + " match no item in the catalogue, for example: " + data.unmatched_samples.slice(0, 5).join(", ") + (data.unmatched_count > 5 ? ", \u2026" : "") }) : el("div", { class: "meta", text: "Every sold design matches the catalogue." }));
+            }
+            reset.style.display = data.company_pin ? "" : "none";
+            if (data.company_pin) { reset.textContent = "Reset company pin"; reset.title = "Forget which Tally company the sales data belongs to (pin " + data.company_pin + "). The data stays; the next sales push sets a new company."; }
+        } catch (error) { body.textContent = error.message || "Could not load the sales data."; }
+    }
+    document.getElementById("salesBox").addEventListener("toggle", function (event) { if (event.target.open) { loadSales(); } });
+    document.getElementById("salesReset").addEventListener("click", async function () {
+        if (!window.confirm("Reset the company pin? The next sales push will set a new one. The stored sales data stays.")) { return; }
+        var result = await send("/sales_reset_company", { confirm: "RESET" });
+        if (result.ok) { say("Company pin reset."); loadSales(); } else { say(result.data.error || "Could not reset.", true); }
+    });
 
     var renderers = { needs: renderNeeds, order: renderOrder, ordered: renderOrdered, slow: renderSlow };
     async function load() {

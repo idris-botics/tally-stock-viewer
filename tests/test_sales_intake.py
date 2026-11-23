@@ -212,7 +212,7 @@ class Validation(SalesBase):
     def test_the_message_names_the_field_and_the_line_number(self):
         data = self.push(body([line(), line(q=0)])).get_json()
         self.assertIn("line 1", data["error"])
-        self.assertIn("qty", data["error"])
+        self.assertIn("q must", data["error"])                      # the field is named the way the feeder sends it
         self.assertIn("company", self.push(body([line()], company="abc")).get_json()["error"])
 
     def test_the_messages_never_contain_the_item_name(self):
@@ -355,6 +355,22 @@ class Locking(SalesBase):
     def test_the_stock_intake_still_works_after_a_sales_push(self):
         self.push(body([line()]))
         self.assertEqual(self.anon.post("/admin/intake/sync_data", json=PAYLOAD, headers=INTAKE_HEADERS).status_code, 200)
+
+
+class Speed(SalesBase):
+    def test_30000_lines_are_stored_in_under_two_seconds_first_time_and_on_a_repeat(self):
+        lines = [line(v=f"{n:08x}", d=f"2026-01-{1 + n % 28:02d}", i=f"ITEM {n % 3000}", q=1 + n % 3) for n in range(30000)]
+        payload = body(lines)
+        timings = []
+        for attempt in ("first push", "repeat push"):
+            started = time.perf_counter()
+            response = self.push(payload, headers=FORCE)
+            timings.append((attempt, time.perf_counter() - started))
+            self.assertEqual(response.status_code, 200)
+        print(chr(10) + "  sales intake, 30000 lines: " + ", ".join(f"{name} {seconds * 1000:.0f} ms" for name, seconds in timings))
+        for name, seconds in timings:
+            self.assertLess(seconds, 2.0, name)                    # the request, including parsing and checking; the lock is held for less
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM sales_lines"), [(30000,)])
 
 
 class StatusAndReset(SalesBase):

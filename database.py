@@ -471,6 +471,7 @@ def init_database():
         _ensure_users_schema(conn)
         _ensure_stock_capture_schema(conn)
         _ensure_stock_mgmt_schema(conn)
+        _ensure_sales_schema(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_account_logs_timestamp ON account_logs(timestamp)")
         seed_default_data(conn)
@@ -739,6 +740,26 @@ def _ensure_stock_mgmt_schema(conn):
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_restock_orders_item_status ON restock_orders (item_key, status)")
+
+
+def _ensure_sales_schema(conn):
+    """Stock Management v2: sales lines pushed from Tally by the shop-side feeder. No customer, amount or price is ever
+    stored. One row per (voucher, kind, item); a sale and a return of the same item on one voucher are separate rows."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sales_lines (
+            voucher_key TEXT NOT NULL,
+            day TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            item_name TEXT,
+            qty INTEGER NOT NULL,
+            PRIMARY KEY (voucher_key, kind, item_key)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sales_lines_item_day ON sales_lines (item_key, day)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sales_lines_day ON sales_lines (day)")
 
 
 def _ensure_users_schema(conn):

@@ -12,6 +12,7 @@ from flask import Flask, jsonify, request, render_template, send_file, Response,
 import hashlib
 import hmac
 import math
+import sqlite3
 import json
 import os
 import requests
@@ -253,6 +254,8 @@ PUBLIC_ENDPOINTS = {
     # check inside the view itself (see intake_sync_data()), same "missing
     # = 403" discipline as every other optional secret in this codebase.
     "intake_sync_data",
+    # The same shop-side push, for sales lines: its own INTAKE_SYNC_TOKEN check inside the view (see intake_sales()).
+    "intake_sales",
     # Called by scripts/push_new_images.py from another machine after it
     # SCPs new images onto Render's disk -- has its own independent
     # RESCAN_TRIGGER_TOKEN check inside the view itself (see
@@ -653,7 +656,7 @@ _ACTIVITY_COUNTED_GET_ENDPOINTS = {
 # Never counted for any method (public/machine endpoints and pollers).
 _ACTIVITY_EXCLUDED_ENDPOINTS = {
     "static", "health", "robots_txt", "logout",
-    "intake_sync_data", "trigger_rescan", "system_authorize_device",
+    "intake_sync_data", "intake_sales", "trigger_rescan", "system_authorize_device",
 }
 
 _activity_lock = threading.Lock()
@@ -7303,6 +7306,230 @@ def stock_mgmt_orders():
                 result = {}
         _stock_mgmt_cache_clear()
         return jsonify(dict({"ok": True}, **result))
+    except Exception as exc:
+        return _stock_mgmt_failure(exc)
+
+
+# ============================================================
+# SALES INTAKE (Stock Management v2)
+# ============================================================
+# POST /admin/intake/sales: the shop-side feeder pushes the sales lines it read from Tally for a date range, and the
+# site REPLACES every stored line of that range in one short transaction. Same token as the stock intake, its own lock
+# (it never waits for, or holds up, the stock intake), and no customer, amount or price is ever sent or stored.
+SALES_MAX_BODY_BYTES = 3 * 1024 * 1024
+SALES_MAX_LINES = 30000
+SALES_MAX_RANGE_DAYS = 400
+SALES_MAX_QTY = 1000000
+SALES_RETENTION_DAYS = 800
+SALES_DB_TIMEOUT_SECONDS = 5
+SALES_LOCK_TIMEOUT_SECONDS = 5
+SALES_GUARD_EMPTY_MIN_STORED = 50          # an empty push over this many stored lines in its range is refused
+SALES_GUARD_SHRINK_MIN_STORED = 100        # a push under SALES_GUARD_SHRINK_PERCENT of this many or more is refused
+SALES_GUARD_SHRINK_PERCENT = 30
+_SALES_INTAKE_LOCK = threading.Lock()
+_SALES_VOUCHER_RE = re.compile(r"[0-9a-f]{8,64}")
+_SALES_COMPANY_RE = re.compile(r"[0-9a-f]{64}")
+_SALES_DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _sales_day(value):
+    """A 'YYYY-MM-DD' text as a date, else None."""
+    if not isinstance(value, str) or not _SALES_DAY_RE.fullmatch(value):
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _validate_sales_payload(payload):
+    """Checks a pushed sales body and returns (clean, error). `clean` = {company, from, to, rows}; rows are
+    (voucher_key, day, kind, item_key, item_name, qty) with duplicates inside the request (same voucher, kind and
+    cleaned item name) summed. `error` is a short fixed sentence naming the field and the line number; it never holds
+    an item name, a path or exception text. Exactly one of the two is None."""
+    if not isinstance(payload, dict):
+        return None, "body must be a JSON object"
+    company = payload.get("company")
+    if not isinstance(company, str) or not _SALES_COMPANY_RE.fullmatch(company):
+        return None, "company must be 64 lower-case hex characters"
+    first, last = _sales_day(payload.get("from")), _sales_day(payload.get("to"))
+    if first is None:
+        return None, "from must be a date like 2026-01-31"
+    if last is None:
+        return None, "to must be a date like 2026-01-31"
+    if first > last:
+        return None, "from must not be after to"
+    if (last - first).days > SALES_MAX_RANGE_DAYS:
+        return None, f"the range must be at most {SALES_MAX_RANGE_DAYS} days"
+    lines = payload.get("lines")
+    if not isinstance(lines, list):
+        return None, "lines must be a list"
+    if len(lines) > SALES_MAX_LINES:
+        return None, f"lines must hold at most {SALES_MAX_LINES} entries"
+    merged = {}
+    for index, row in enumerate(lines):
+        if not isinstance(row, dict):
+            return None, f"line {index}: must be an object"
+        voucher = row.get("v")
+        if not isinstance(voucher, str) or not _SALES_VOUCHER_RE.fullmatch(voucher):
+            return None, f"line {index}: v must be 8 to 64 characters of 0-9 and a-f"
+        day = _sales_day(row.get("d"))
+        if day is None:
+            return None, f"line {index}: d must be a date like 2026-01-31"
+        if not first <= day <= last:
+            return None, f"line {index}: d must lie inside from and to"
+        kind = row.get("k")
+        if kind not in ("sale", "return"):
+            return None, f"line {index}: k must be sale or return"
+        name = row.get("i")
+        if not isinstance(name, str) or not name.strip() or len(name) > 200:
+            return None, f"line {index}: i must be 1 to 200 characters"
+        qty = row.get("q")
+        if isinstance(qty, bool):
+            qty = None
+        elif isinstance(qty, float) and qty.is_integer():
+            qty = int(qty)
+        if not isinstance(qty, int) or not 1 <= qty <= SALES_MAX_QTY:
+            return None, f"line {index}: q must be a whole number from 1 to {SALES_MAX_QTY}"
+        item_key = _stock_item_key(name)
+        slot = (voucher, kind, item_key)
+        if slot in merged:
+            merged[slot][5] += qty
+        else:
+            merged[slot] = [voucher, day.isoformat(), kind, item_key, re.sub(r"\s+", " ", name).strip(), qty]
+    rows = [tuple(entry) for entry in merged.values()]
+    return {"company": company, "from": first.isoformat(), "to": last.isoformat(), "rows": rows}, None
+
+
+@contextmanager
+def _short_db_connection(timeout):
+    """A database connection that gives up waiting for a lock after `timeout` seconds (the normal one waits 30)."""
+    _machine_role.refuse_db_access_if_feeder()
+    conn = sqlite3.connect(db.DB_PATH, timeout=timeout)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA synchronous = NORMAL")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _sales_refusal(message, status):
+    return jsonify({"error": message, "refused": True}), status
+
+
+@app.route("/admin/intake/sales", methods=["POST"])
+def intake_sales():
+    expected_token = Config.INTAKE_SYNC_TOKEN
+    if not expected_token:
+        return jsonify({"error": "Intake sync is not configured. Set INTAKE_SYNC_TOKEN in .env to enable it."}), 403
+    provided_token = request.headers.get("X-Intake-Token", "")
+    if not provided_token or not hmac.compare_digest(provided_token, expected_token):
+        return jsonify({"error": "Invalid or missing intake token."}), 403
+
+    if request.content_length is not None and request.content_length > SALES_MAX_BODY_BYTES:
+        return _sales_refusal("body too large", 413)
+    raw = request.stream.read(SALES_MAX_BODY_BYTES + 1)
+    if len(raw) > SALES_MAX_BODY_BYTES:
+        return _sales_refusal("body too large", 413)
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        payload = None
+    clean, error = _validate_sales_payload(payload)
+    if error is not None:
+        return _sales_refusal(error, 422)
+
+    force = request.headers.get("X-Intake-Force") == "1"
+    rows = clean["rows"]
+    if not _SALES_INTAKE_LOCK.acquire(timeout=SALES_LOCK_TIMEOUT_SECONDS):
+        return jsonify({"error": "busy"}), 503
+    try:
+        with _short_db_connection(SALES_DB_TIMEOUT_SECONDS) as conn:
+            pinned = _capture_meta_get(conn, "sales_company_hash")
+            if pinned and pinned != clean["company"]:
+                return _sales_refusal("company mismatch", 409)
+            stored = conn.execute("SELECT COUNT(*) FROM sales_lines WHERE day BETWEEN ? AND ?", (clean["from"], clean["to"])).fetchone()[0]
+            if not force and ((not rows and stored >= SALES_GUARD_EMPTY_MIN_STORED)
+                              or (stored >= SALES_GUARD_SHRINK_MIN_STORED and len(rows) * 100 < SALES_GUARD_SHRINK_PERCENT * stored)):
+                logger.warning("Cloud sales intake: push refused (%d lines pushed, %d stored in %s..%s)",
+                               len(rows), stored, clean["from"], clean["to"])
+                return _sales_refusal("this push would remove most of the stored sales lines", 422)
+            if not pinned:
+                _capture_meta_set(conn, "sales_company_hash", clean["company"])
+            deleted = conn.execute("DELETE FROM sales_lines WHERE day BETWEEN ? AND ?", (clean["from"], clean["to"])).rowcount
+            conn.executemany("INSERT OR REPLACE INTO sales_lines (voucher_key, day, kind, item_key, item_name, qty) VALUES (?, ?, ?, ?, ?, ?)", rows)
+            _capture_meta_set(conn, "sales_last_sync_utc", _stock_now_utc().strftime("%Y-%m-%dT%H:%M:%S"))
+            _capture_meta_set(conn, "sales_last_from", clean["from"])
+            _capture_meta_set(conn, "sales_last_to", clean["to"])
+            today = _today_ist()
+            if _capture_meta_get(conn, "last_sales_prune_day_ist") != today:      # once per IST day, never per push
+                conn.execute("DELETE FROM sales_lines WHERE day < ?", (_ist_day_minus(SALES_RETENTION_DAYS),))
+                _capture_meta_set(conn, "last_sales_prune_day_ist", today)
+        _stock_mgmt_cache_clear()
+        logger.info("Cloud sales intake: %s..%s, %d lines (%d replaced)", clean["from"], clean["to"], len(rows), deleted)
+        return jsonify({"ok": True, "from": clean["from"], "to": clean["to"], "deleted": deleted, "inserted": len(rows)})
+    except sqlite3.OperationalError as exc:
+        if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+            return jsonify({"error": "busy"}), 503
+        logger.warning("Cloud sales intake failed (%s)", type(exc).__name__)
+        return jsonify({"error": "Could not store the sales data."}), 500
+    except Exception as exc:
+        logger.warning("Cloud sales intake failed (%s)", type(exc).__name__)      # class name only: never item names or paths
+        return jsonify({"error": "Could not store the sales data."}), 500
+    finally:
+        _SALES_INTAKE_LOCK.release()
+
+
+def _sales_status_payload():
+    with db.get_connection() as conn:
+        meta = {row[0]: row[1] for row in conn.execute("SELECT key, value FROM capture_meta WHERE key LIKE 'sales_%'")}
+        total, vouchers, items, first_day, last_day = conn.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT voucher_key), COUNT(DISTINCT item_key), MIN(day), MAX(day) FROM sales_lines").fetchone()
+        months = [{"month": row[0], "vouchers": row[1], "sold": row[2], "returned": row[3], "net": row[2] - row[3]} for row in conn.execute(
+            "SELECT substr(day, 1, 7), COUNT(DISTINCT voucher_key), "
+            "COALESCE(SUM(CASE WHEN kind = 'sale' THEN qty END), 0), COALESCE(SUM(CASE WHEN kind = 'return' THEN qty END), 0) "
+            "FROM sales_lines GROUP BY substr(day, 1, 7) ORDER BY 1")]
+        sold = [row[0] for row in conn.execute("SELECT DISTINCT item_key FROM sales_lines")]
+        known = set(_stock_catalogue()["items"]) | set(_stock_state_map(conn))
+    unmatched = sorted(key for key in sold if key not in known)
+    synced = _parse_utc(meta.get("sales_last_sync_utc"))
+    pin = meta.get("sales_company_hash")
+    return {
+        "has_data": total > 0, "last_sync_utc": meta.get("sales_last_sync_utc"),
+        "last_sync_ist": (synced + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M") if synced else None,
+        "last_from": meta.get("sales_last_from"), "last_to": meta.get("sales_last_to"),
+        "first_day": first_day, "last_day": last_day, "total_lines": total, "vouchers": vouchers, "items": items,
+        "months": months, "unmatched_count": len(unmatched), "unmatched_samples": unmatched[:20],
+        "company_pin": pin[:6] if pin else None,
+    }
+
+
+@app.route("/admin/stock_mgmt/sales_status")
+@admin_required
+def stock_mgmt_sales_status():
+    try:
+        return jsonify(_stock_mgmt_cached(("sales_status", get_data_versions()["data_version"]), _sales_status_payload))
+    except Exception as exc:
+        return _stock_mgmt_failure(exc)
+
+
+@app.route("/admin/stock_mgmt/sales_reset_company", methods=["POST"])
+@admin_required
+def stock_mgmt_sales_reset_company():
+    """Forgets which Tally company the sales data belongs to (the data itself stays); the next sales push pins its own."""
+    body = request.get_json(silent=True) if request.is_json else None
+    if not isinstance(body, dict) or body.get("confirm") != "RESET":
+        return jsonify({"error": 'Send {"confirm": "RESET"} to reset the company pin.'}), 422
+    try:
+        with _STOCK_MGMT_WRITE_LOCK, db.get_connection() as conn:
+            conn.execute("DELETE FROM capture_meta WHERE key = 'sales_company_hash'")
+        _stock_mgmt_cache_clear()
+        return jsonify({"ok": True})
     except Exception as exc:
         return _stock_mgmt_failure(exc)
 

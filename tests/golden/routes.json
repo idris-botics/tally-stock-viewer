@@ -56,9 +56,9 @@
   "type": "application/json"
  },
  "admin_locked GET /admin/stock_mgmt": {
-  "body": "4be2521355",
+  "body": "46212e454e",
   "cache": "",
-  "len": 43685,
+  "len": 46928,
   "location": "",
   "status": 200,
   "type": "text/html"
@@ -78,6 +78,14 @@
   "location": "",
   "status": 200,
   "type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+ },
+ "admin_locked GET /admin/stock_mgmt/sales_status": {
+  "body": "2c502f5785",
+  "cache": "no-store",
+  "len": 265,
+  "location": "",
+  "status": 200,
+  "type": "application/json"
  },
  "admin_locked GET /admin/system": {
   "body": "d38e186243",
@@ -631,6 +639,14 @@
   "status": 403,
   "type": "application/json"
  },
+ "admin_locked POST /admin/intake/sales": {
+  "body": "5309f0d050",
+  "cache": "no-store",
+  "len": 45,
+  "location": "",
+  "status": 403,
+  "type": "application/json"
+ },
  "admin_locked POST /admin/intake/sync_data": {
   "body": "5309f0d050",
   "cache": "no-store",
@@ -693,6 +709,14 @@
   "len": 27,
   "location": "",
   "status": 400,
+  "type": "application/json"
+ },
+ "admin_locked POST /admin/stock_mgmt/sales_reset_company": {
+  "body": "c9be8b9523",
+  "cache": "no-store",
+  "len": 68,
+  "location": "",
+  "status": 422,
   "type": "application/json"
  },
  "admin_locked POST /admin/stock_mgmt/settings": {
@@ -960,9 +984,9 @@
   "type": "application/json"
  },
  "admin_unlocked GET /admin/stock_mgmt": {
-  "body": "4be2521355",
+  "body": "46212e454e",
   "cache": "",
-  "len": 43685,
+  "len": 46928,
   "location": "",
   "status": 200,
   "type": "text/html"
@@ -982,6 +1006,14 @@
   "location": "",
   "status": 200,
   "type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+ },
+ "admin_unlocked GET /admin/stock_mgmt/sales_status": {
+  "body": "2c502f5785",
+  "cache": "no-store",
+  "len": 265,
+  "location": "",
+  "status": 200,
+  "type": "application/json"
  },
  "admin_unlocked GET /admin/system": {
   "body": "2cb520b3a7",
@@ -1535,6 +1567,14 @@
   "status": 200,
   "type": "application/json"
  },
+ "admin_unlocked POST /admin/intake/sales": {
+  "body": "5309f0d050",
+  "cache": "no-store",
+  "len": 45,
+  "location": "",
+  "status": 403,
+  "type": "application/json"
+ },
  "admin_unlocked POST /admin/intake/sync_data": {
   "body": "5309f0d050",
   "cache": "no-store",
@@ -1597,6 +1637,14 @@
   "len": 27,
   "location": "",
   "status": 400,
+  "type": "application/json"
+ },
+ "admin_unlocked POST /admin/stock_mgmt/sales_reset_company": {
+  "body": "c9be8b9523",
+  "cache": "no-store",
+  "len": 68,
+  "location": "",
+  "status": 422,
   "type": "application/json"
  },
  "admin_unlocked POST /admin/stock_mgmt/settings": {
@@ -1883,6 +1931,14 @@
   "body": "5cba276706",
   "cache": "",
   "len": 6144,
+  "location": "",
+  "status": 401,
+  "type": "text/html"
+ },
+ "anonymous GET /admin/stock_mgmt/sales_status": {
+  "body": "e7f8e7f733",
+  "cache": "",
+  "len": 6150,
   "location": "",
   "status": 401,
   "type": "text/html"
@@ -2439,6 +2495,14 @@
   "status": 401,
   "type": "application/json"
  },
+ "anonymous POST /admin/intake/sales": {
+  "body": "5309f0d050",
+  "cache": "no-store",
+  "len": 45,
+  "location": "",
+  "status": 403,
+  "type": "application/json"
+ },
  "anonymous POST /admin/intake/sync_data": {
   "body": "5309f0d050",
   "cache": "no-store",
@@ -2496,6 +2560,14 @@
   "type": "application/json"
  },
  "anonymous POST /admin/stock_mgmt/orders": {
+  "body": "ee2876c01a",
+  "cache": "no-store",
+  "len": 27,
+  "location": "",
+  "status": 401,
+  "type": "application/json"
+ },
+ "anonymous POST /admin/stock_mgmt/sales_reset_company": {
   "body": "ee2876c01a",
   "cache": "no-store",
   "len": 27,
@@ -2784,6 +2856,14 @@
   "type": "application/json"
  },
  "dealer GET /admin/stock_mgmt/export": {
+  "body": "9d21e23c8b",
+  "cache": "no-store",
+  "len": 34,
+  "location": "",
+  "status": 403,
+  "type": "application/json"
+ },
+ "dealer GET /admin/stock_mgmt/sales_status": {
   "body": "9d21e23c8b",
   "cache": "no-store",
   "len": 34,
@@ -3343,6 +3423,14 @@
   "status": 403,
   "type": "application/json"
  },
+ "dealer POST /admin/intake/sales": {
+  "body": "5309f0d050",
+  "cache": "no-store",
+  "len": 45,
+  "location": "",
+  "status": 403,
+  "type": "application/json"
+ },
  "dealer POST /admin/intake/sync_data": {
   "body": "5309f0d050",
   "cache": "no-store",
@@ -3400,6 +3488,14 @@
   "type": "application/json"
  },
  "dealer POST /admin/stock_mgmt/orders": {
+  "body": "9d21e23c8b",
+  "cache": "no-store",
+  "len": 34,
+  "location": "",
+  "status": 403,
+  "type": "application/json"
+ },
+ "dealer POST /admin/stock_mgmt/sales_reset_company": {
   "body": "9d21e23c8b",
   "cache": "no-store",
   "len": 34,
