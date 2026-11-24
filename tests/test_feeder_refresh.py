@@ -136,6 +136,7 @@ class FeederRefreshTriggers(unittest.TestCase):
         self.assertTrue(r.wait(lambda: len(r.pushes) >= 2))
         r.items["ALTO"].append(("ALTO NEW ONE", 1))
         self.assertTrue(r.wait(lambda: r.reasons().count("new item") == 1, 30))
+        self.assertTrue(r.wait(lambda: "Full refresh from Tally completed: reason=new item" in r.log(), 10))      # the first refresh is over before the second item appears
         first = time.time()
         r.items["SWIFT"].append(("SWIFT NEW TWO", 1))    # a second new item straight after
         self.assertTrue(r.wait(lambda: "throttled" in r.log(), 20), "second request should be throttled")
