@@ -1,57 +1,57 @@
-"""Read-only look at what the sales sync would send. Reads sales vouchers and credit notes from Tally for the last N days
-(default 30, at most 365), in small steps, and PRINTS a summary. It never pushes anything and never writes any file.
+"""Read-only look at what the sales sync would send. Reads sales vouchers and credit notes from Tally for the last 3 calendar months
+(this month and the 2 before it), ONE CALENDAR MONTH at a time, and PRINTS a summary. It never pushes anything and never writes any file.
 
-Prints: the first 8 characters of the company hash, counts, a per-month table (sales slips, units sold, units returned, net) and the
-first 15 lines (day, sale/return, item, quantity). Never a customer, ledger, amount, rate, narration, voucher number or key.
+Prints: the first 8 characters of the company hash, a table per month (sale vouchers, credit notes, units sold, units returned, net,
+distinct items, seconds, bytes) and the first 15 lines (day, sale/return, item, quantity) of the newest month that has any. Never a
+customer, ledger, amount, rate, narration, voucher number or key.
 
-Run it with tools\\shop\\SALES_PROBE.bat   (or: .venv\\Scripts\\python.exe tools\\shop\\sales_probe.py --days 30)
+Run it with tools\\shop\\SALES_PROBE.bat   (or: .venv\\Scripts\\python.exe tools\\shop\\sales_probe.py [--today 2026-11-24])
 """
 import os
 import sys
 import time
-from datetime import date, timedelta
+from datetime import date
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+import sales_sync  # noqa: E402
 import tally_sales  # noqa: E402
 
-DEFAULT_DAYS, MAX_DAYS, CHUNK_DAYS, SAMPLE_LINES, PAUSE_SECONDS = 30, 365, 31, 15, 0.5
+MONTHS_SHOWN, SAMPLE_LINES, PAUSE_SECONDS = 3, 15, 0.5
 
 
-def parse_days(argv):
-    """--days N or --days=N: default 30, at least 1, at most 365; anything unreadable gives the default."""
+def parse_today(argv):
+    """--today YYYY-MM-DD or --today=YYYY-MM-DD, else None (the probe then asks the same clock the sync uses)."""
     value = None
     for index, arg in enumerate(argv):
-        if arg == "--days" and index + 1 < len(argv):
+        if arg == "--today" and index + 1 < len(argv):
             value = argv[index + 1]
-        elif arg.startswith("--days="):
+        elif arg.startswith("--today="):
             value = arg.split("=", 1)[1]
     try:
-        return max(1, min(MAX_DAYS, int(value)))
-    except (TypeError, ValueError):
-        return DEFAULT_DAYS
+        return date.fromisoformat(value) if value else None
+    except ValueError:
+        return None
 
 
 def main(argv=None, reader=None, out=print, today=None, pause=PAUSE_SECONDS):
     argv = sys.argv[1:] if argv is None else argv
-    days = parse_days(argv)
+    today = parse_today(argv) or today or sales_sync.RealClock().local_now().date()
     reader = reader or tally_sales.TallyReader()
-    today = today or date.today()
-    first_day = today - timedelta(days=days)
-    out(f"Sales probe: reading the last {days} days from Tally. Nothing is sent anywhere and nothing is saved.")
+    months = [(today.year, today.month)]
+    while len(months) < MONTHS_SHOWN:
+        months.append(sales_sync.previous_month(*months[-1]))
+    out("Sales probe: reading the last 3 calendar months from Tally, one month at a time. Nothing is sent anywhere and nothing is saved.")
+    out("request mode: calendar months")
+    results = []
     try:
         name = reader.company_name()
-        lines, totals = [], tally_sales.new_stats()
-        end = today
-        while end >= first_day:
-            start = max(end - timedelta(days=CHUNK_DAYS - 1), first_day)
-            lines += reader.fetch_sales_lines(start, end)
-            for key, value in reader.last_stats.items():
-                totals[key] += value
-            end = start - timedelta(days=1)
-            if end >= first_day:
+        for index, (year, month) in enumerate(months):
+            lines, stats = reader.fetch_month(year, month)
+            results.append((sales_sync.month_key(year, month), lines, stats))
+            if index + 1 < len(months):
                 time.sleep(pause)
     except tally_sales.TallyReadError as exc:
         out("Could not read from Tally: " + str(exc) + ".")
@@ -59,23 +59,27 @@ def main(argv=None, reader=None, out=print, today=None, pause=PAUSE_SECONDS):
         return 1
     out("")
     out("Company (first 8 characters of its hash): " + (tally_sales.company_hash(name)[:8] if name else "could not be read"))
-    out(f"vouchers: {totals['vouchers']}")
-    out(f"lines: {len(lines)}")
-    out(f"left out: {totals['cancelled']} cancelled, {totals['optional']} optional, {totals['other_types']} other voucher types, "
-        f"{totals['fractional']} fractional quantities rounded down, {totals['bad']} unreadable")
-    months = {}
-    for key in sorted({(line["voucher_key"], line["day"].strftime("%Y-%m")) for line in lines if line["kind"] == "sale"}):
-        months.setdefault(key[1], [0, 0, 0])[0] += 1
-    for line in lines:
-        row = months.setdefault(line["day"].strftime("%Y-%m"), [0, 0, 0])
-        row[1 if line["kind"] == "sale" else 2] += line["qty"]
     out("")
-    out("month     slips   sold  returned    net")
-    for month in sorted(months):
-        slips, sold, returned = months[month]
-        out(f"{month}  {slips:6d} {sold:6d} {returned:9d} {sold - returned:6d}")
+    out("month    sale vouchers  credit notes     sold  returned     net  items  seconds       bytes")
+    for key, lines, stats in sorted(results):
+        sold = sum(line["qty"] for line in lines if line["kind"] == "sale")
+        returned = sum(line["qty"] for line in lines if line["kind"] == "return")
+        items = len({line["item"] for line in lines})
+        out(f"{key}  {stats['sale_vouchers']:12d} {stats['credit_notes']:13d} {sold:8d} {returned:9d} {sold - returned:7d} {items:6d} "
+            f"{stats['seconds']:8.1f} {stats['bytes']:11d}")
+    left_out = {name_: sum(stats[name_] for _key, _lines, stats in results) for name_ in
+                ("skipped_other_type", "skipped_cancelled", "skipped_optional", "skipped_no_date", "dropped_out_of_range", "fractional")}
     out("")
-    out(f"first {min(SAMPLE_LINES, len(lines))} lines (day, kind, item, quantity):")
+    out(f"left out: {left_out['skipped_cancelled']} cancelled, {left_out['skipped_optional']} optional, {left_out['skipped_other_type']} "
+        f"other voucher types, {left_out['skipped_no_date']} without a date, {left_out['dropped_out_of_range']} outside the month, "
+        f"{left_out['fractional']} fractional quantities rounded down")
+    newest = next(((key, lines) for key, lines, _stats in sorted(results, reverse=True) if lines), None)
+    out("")
+    if newest is None:
+        out("no sales lines in these 3 months")
+        return 0
+    key, lines = newest
+    out(f"first {min(SAMPLE_LINES, len(lines))} lines of {key} (day, kind, item, quantity):")
     for line in sorted(lines, key=lambda item: (item["day"], item["voucher_key"]))[:SAMPLE_LINES]:
         out(f"  {line['day']}  {line['kind']:6s} {line['item']}  x{line['qty']}")
     return 0

@@ -2,68 +2,71 @@
 
 The feeder on the shop PC already sends **stock** to the website every few minutes. After the next `SHOP_UPDATE.bat` it also sends **sales**: what sold and what came back (credit notes), item by item. The website uses it for Stock Management (Sold out, Last piece, Cars running thin, Slow stock).
 
+## How it works, in 10 lines
+
+1. The sync asks Tally for **one whole calendar month at a time** (for example "October 2026"). Tally cannot be trusted with other kinds of date questions, so it is never asked any.
+2. It asks only for sales slips and credit notes. Tally itself decides which slips count, by their base type, so renamed voucher types (SALES-HO, Sales Gst, MEESHO SALES ...) are found correctly. Delivery notes, purchases and stock journals are left out.
+3. **Every 30 minutes** it re-reads the current month. If nothing changed since the last time, **nothing is sent** to the website (it only sends again once a day, as a safety net).
+4. **History loads newest first**: last month, then the month before, and so on, one month every few minutes, down to 365 days back. So the website always has one unbroken stretch of months that ends with the current month.
+5. **Every night** (after 03:00) it re-reads the current month and the two before it, and sends the ones that changed. This catches slips that were edited or deleted in Tally.
+6. It does one small step per feeder cycle (every 3 minutes), after the stock push, and only when that stock push worked. The first cycle after a start does nothing.
+7. If Tally is closed or slow, or the website says no, it logs one quiet line and backs off. The stock feeder is never affected.
+8. If reading a month takes longer than 40 seconds, it reads less often (the 30 minutes stretch, up to 4 hours) and goes back to normal when Tally is fast again.
+9. Progress is kept in `data/sales_sync_state.json` (small, written safely). Delete that file to load the history again from scratch. A missing or damaged file just starts fresh.
+10. `SALES_SYNC=off` in `.env` switches it off completely.
+
 ## What is sent, and what is never sent
 
 Only this, per line: an anonymous voucher key (it cannot be turned back into the voucher), the day, `sale` or `return`, the item name, a whole number of pieces, and a one-way hash of the company name.
 
-**NEVER sent or logged:** customer or party names, ledger names, amounts, rates, narration, voucher numbers, GUIDs in clear. The Tally request itself does not ask for them. The log shows only counts and date ranges, never item names.
+**NEVER sent or logged:** customer or party names, ledger names, amounts, rates, narration, voucher numbers, GUIDs in clear.
 
-## How it works
+Tally hands over the whole slip when it answers (party names and amounts included). The sync reads only the date, the type flags, the cancelled and optional flags, the GUID, the voucher number and the item name and quantity lines. Everything else is dropped on the spot: it is never stored, logged or sent, and a test proves it. The log shows only counts and months, never item names.
 
-One small step per feeder cycle (every 3 minutes), after the stock push, and only when that stock push worked. The first cycle after a start does nothing.
-
-1. **Incremental** - the last 3 days, every 15 minutes (the very first step ever).
-2. **History** - one chunk at a time, at least 2 cycles apart. **History fills newest-first**: the first chunk ends 3 days before today and each next chunk goes further back, so the website always holds one unbroken stretch of days that ends today. It stops at the oldest day (365 days back by default).
-3. **Nightly** - the last 36 days once a day after 03:00. This heals vouchers that were changed or deleted in Tally.
-
-Every push **replaces** the website's lines for the days it covers, so sending the same thing twice changes nothing. The chunk size adapts: a read slower than 40 seconds (or a Tally time-out) halves it, a read faster than 10 seconds makes it 1.5 times bigger (1 to 60 days, starting at 31). Large pushes are split in pieces of at most 25,000 lines. Cancelled and optional vouchers are left out; a credit note counts as a return; a custom voucher type counts by its parent type (Sales or Credit Note).
-
-Progress is kept in `data/sales_sync_state.json` (small, written safely). Delete that file to load the history again from scratch. A missing or damaged file just starts fresh.
-
-## Settings (in the feeder's `.env` or environment)
+## Settings (in the feeder's `.env`)
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `SALES_SYNC` | `on` | `on`, `off` (nothing happens, Tally is never asked) or `dryrun` (reads Tally and logs how many lines it would send, sends nothing, saves nothing) |
+| `SALES_SYNC` | `on` | `on`, `off` (nothing happens, Tally is never asked) or `dryrun` (reads Tally and logs what it would send, sends nothing, saves nothing) |
 | `SALES_BACKFILL_DAYS` | `365` | how far back history goes (1 to 400) |
-| `SALES_INCREMENTAL_MINUTES` | `15` | how often the last 3 days are sent |
+| `SALES_INCREMENTAL_MINUTES` | `30` | how often the current month is re-read |
 | `SALES_NIGHTLY_HOUR` | `3` | hour (0 to 23, shop PC time) after which the nightly step runs |
 
-To switch it off in an emergency: put `SALES_SYNC=off` in `.env` and restart the feeder. The stock feeder is not affected either way.
+## Check it on your laptop (no settings to edit)
 
-## Log lines (logs/feeder.log)
+Open the company in Tally Prime. A copy of the real company is fine: Tally Prime Educational only limits **entering** vouchers to the 1st, 2nd and last day of a month; reading old vouchers works. Switch on its HTTP server on port 9000.
 
-- `Sales sync: incremental 2026-03-18..2026-03-20 pushed 41 lines` (also `backfill` and `nightly`)
-- `Sales sync: backfill complete (365 days)`
-- `Sales sync: off`
-- `Sales sync: waiting for the website to be updated` - the website answered 404: it does not have the sales route yet. The sync waits an hour and tries again.
-- `Sales sync refused: company differs from the one the website already knows` - the website answered 409. The website remembers the first company it received. The sync stops for 24 hours. If the shop really moved to another Tally company, an admin can reset the company pin in the Sales data box on the Stock Management page.
-- `Sales sync refused by the website (422): ...` - the website refused a push (the reason is shown). Logged at most once an hour.
-- `Sales sync error: <name>` - an unexpected problem inside the sales step. The stock feeder keeps running. Logged at most once every 10 minutes.
+1. Double-click `tools\dev\SALES_LOCAL_CHECK.bat`, wait about a minute, and send the screenshot or the text.
+2. It starts a throw-away copy of the website in a temporary folder (own database, test token), runs the real sales sync against your real Tally, and reads back what the throw-away website stored. It prints one line per step, a table per month with PASS or FAIL, and the totals. The last line says `OVERALL: PASS` or `OVERALL: FAIL`.
+3. It never reads your `.env`, never touches your real data folder, never contacts the real website, and deletes its temporary files when it finishes. The last line always says `Nothing was sent to any real website.`
+4. It also writes the per-item list of the last full month to a text file and prints where (a path in the Windows temp folder). Open it to compare item by item with Tally.
 
-## Check it by hand before trusting it: the probe
+To compare with Tally by hand: run `tools\shop\SALES_PROBE.bat`. It reads the last 3 calendar months and prints one row per month (sale vouchers, credit notes, sold, returned, net, items, seconds, bytes) and the first 15 lines of the newest month. In Tally open Stock Summary, press F12 and set Show Goods Inwards and Show Goods Outwards to Yes, pick one full past month, and look at the Outwards quantities. Credit notes show as negative outwards, so Tally's Outwards equals the probe's **net**. Tally's Stock Summary also counts delivery notes, which the sync leaves out on purpose, so a difference of that size is expected.
 
-Double-click `tools\shop\SALES_PROBE.bat` (or run it with `--days 60`). It reads the last 30 days (at most 365) from Tally in small steps and **prints** what the sync would see: counts, a table per month (slips, sold, returned, net) and the first 15 lines. It sends nothing and saves nothing. Compare the month table with Tally's own sales register.
+## Go live on the shop PC
 
-## Testing on a laptop with Tally Prime Educational
+1. Update the shop PC with `SHOP_UPDATE.bat`. The sync starts by itself with the feeder.
+2. First put `SALES_SYNC=dryrun` in the shop's `.env`, restart the feeder, and look at `logs/feeder.log` for one day. You should see lines like `Sales sync (dry run): incremental 2026-11 read 146 lines ... would push them`. Nothing is sent in this mode.
+3. When the log looks right, change it to `SALES_SYNC=on` (or remove the line) and restart the feeder. After a few minutes the Sales data box on the Stock Management page starts to fill, newest month first.
+4. If Tally ever feels slow while the history loads, put `SALES_SYNC=off` and restart the feeder. The stock feeder is not affected either way.
 
-Educational mode only allows vouchers dated the 1st, 2nd and the last day of a month, so a test company has few dates. That is enough to prove the chain.
+## What the log lines mean (logs/feeder.log)
 
-1. Start the website locally (never the real one). Use the local copy with its own `.env`, for example `http://127.0.0.1:5000`.
-2. In the laptop's feeder `.env` set `CLOUD_SYNC_URL=http://127.0.0.1:5000/admin/intake/sync_data` and `CLOUD_SYNC_TOKEN=test-token-local` (the same token in the local website's `.env`). NEVER put the real address or the real token there.
-3. Open Tally Prime Educational with a test company that has a few sales and credit notes, with its HTTP server on (port 9000 by default).
-4. Run `tools\shop\SALES_PROBE.bat --days 90` and check the numbers.
-5. Set `SALES_SYNC=dryrun`, start the feeder, and watch `logs/feeder.log` for `would push` lines.
-6. Set `SALES_SYNC=on` (or remove the line) and restart. After a few cycles you should see `incremental` then `backfill` lines, and the Sales data box on the Stock Management page fills in.
-7. Change a voucher in Tally. The change appears after the next incremental (recent days) or the nightly step (older days).
+- `Sales sync: incremental 2026-11 pushed 146 lines` (also `backfill` and `nightly`): a month was read and sent.
+- `Sales sync: incremental 2026-11 unchanged, no push (146 lines)`: the month is the same as the last time, so nothing was sent. This is the normal quiet state.
+- `Sales sync: backfill complete (365 days)`: the history is fully loaded.
+- `Sales sync: off`: the setting is off.
+- `Sales sync: Tally is not reachable; will try again`: Tally is closed or its HTTP server is off. Nothing to do; it tries again by itself.
+- `Sales sync: Tally was too slow to read 2026-10; will try again`: Tally did not answer within 2 minutes. It is not asked again at once.
+- `Sales sync: Tally needed 45 s to read a month; the incremental interval is now 60 minutes`: Tally is slow, so the sync reads less often. Logged at most once an hour.
+- `Sales sync: could not read the company name from Tally; nothing is sent until it can`: Tally has no company open.
+- **404** `Sales sync: waiting for the website to be updated`: the website does not have the sales route yet. The sync waits an hour and tries again. Nothing to do on the shop PC.
+- **409** `Sales sync refused: company differs from the one the website already knows`: the website remembers the first Tally company it received. The sync stops for 24 hours. If the shop really moved to another Tally company (for example a new financial-year company), an admin resets the company pin in the Sales data box on the Stock Management page, and the sync then continues.
+- **422** `Sales sync refused by the website (422): ...`: the website refused a push and says why (for example it would remove most of the stored lines). It is logged at most once an hour and the sync backs off. Tell the developer the reason shown.
+- `Sales sync error: <name>`: an unexpected problem inside the sales step. The stock feeder keeps running. Logged at most once every 10 minutes.
 
 ## If something looks wrong
 
 - Nothing in the log: check `SALES_SYNC` is not `off`, and that stock pushes are succeeding (sales only run after a good stock cycle).
-- "waiting for the website": the website has not been updated yet; nothing to do on the shop PC.
-- "company differs": see above.
+- The company name changed (for example a new financial-year company): the sync stops with the 409 line above until an admin resets the company pin in the Sales data box.
 - Quantities with decimals (metres, kilos) are rounded down to whole units; the probe shows how many.
-
-## What the owner should verify on a real Tally
-
-These parts cannot be proven without Tally itself: that Tally accepts the sales request (it falls back to asking for all voucher types and filtering here when it does not take the filter), that the company name is read correctly, and that the parent voucher type of custom voucher types is reported. The probe is the quick way to see all three.
