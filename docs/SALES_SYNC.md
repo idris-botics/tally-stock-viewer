@@ -6,12 +6,12 @@ The feeder on the shop PC already sends **stock** to the website every few minut
 
 1. The sync asks Tally for **one whole calendar month at a time** (for example "October 2026"). Tally cannot be trusted with other kinds of date questions, so it is never asked any.
 2. It asks only for sales slips and credit notes. Tally itself decides which slips count, by their base type, so renamed voucher types (SALES-HO, Sales Gst, MEESHO SALES ...) are found correctly. Delivery notes, purchases and stock journals are left out.
-3. **Every 30 minutes** it re-reads the current month. If nothing changed since the last time, **nothing is sent** to the website (it only sends again once a day, as a safety net).
-4. **History loads newest first**: last month, then the month before, and so on, one month every few minutes, down to 365 days back. So the website always has one unbroken stretch of months that ends with the current month.
-5. **Every night** (after 03:00) it re-reads the current month and the two before it, and sends the ones that changed. This catches slips that were edited or deleted in Tally.
+3. **It only asks Tally again when the stock moved.** The feeder already notices when the stock it exports changes. The sync re-reads the current month when the stock has moved since its last read and at least 30 minutes have passed, and in any case at least every 2 hours. On a quiet day or at night Tally is hardly asked at all. If nothing changed in the month, **nothing is sent** to the website (it only sends again once a day, as a safety net).
+4. **History loads newest first**: last month, then the month before, and so on, one month every few minutes, down to 365 days back. So the website always has one unbroken stretch of months that ends with the current month. **History only loads outside shop hours** (see the settings): in the evening after 19:30, at night, and all day Sunday.
+5. **Every night** (after 03:00, and never during shop hours) it re-reads the current month and the two before it, and sends the ones that changed. This catches slips that were edited or deleted in Tally.
 6. It does one small step per feeder cycle (every 3 minutes), after the stock push, and only when that stock push worked. The first cycle after a start does nothing.
 7. If Tally is closed or slow, or the website says no, it logs one quiet line and backs off. The stock feeder is never affected.
-8. If reading a month takes longer than 40 seconds, it reads less often (the 30 minutes stretch, up to 4 hours) and goes back to normal when Tally is fast again.
+8. If reading a month takes longer than 15 seconds, it reads less often (the 30 minutes stretch, up to 4 hours) and warns in the log. It goes back to normal when Tally is fast again.
 9. Progress is kept in `data/sales_sync_state.json` (small, written safely). Delete that file to load the history again from scratch. A missing or damaged file just starts fresh.
 10. `SALES_SYNC=off` in `.env` switches it off completely.
 
@@ -31,6 +31,7 @@ Tally hands over the whole slip when it answers (party names and amounts include
 | `SALES_BACKFILL_DAYS` | `365` | how far back history goes (1 to 400) |
 | `SALES_INCREMENTAL_MINUTES` | `30` | how often the current month is re-read |
 | `SALES_NIGHTLY_HOUR` | `3` | hour (0 to 23, shop PC time) after which the nightly step runs |
+| `SALES_SHOP_HOURS` | `10:00-19:30` | while the shop is open (Monday to Saturday, shop PC time) the history load and the nightly step wait; Sunday counts as closed. Leave it empty (`SALES_SHOP_HOURS=`) for no limit. The current month is still read during shop hours, but only when the stock moved |
 
 ## Check it on your laptop (no settings to edit)
 
@@ -54,18 +55,27 @@ The sync reads its `SALES_*` settings **once, when the feeder starts**. After yo
 
 ## What the log lines mean (logs/feeder.log)
 
-- `Sales sync: incremental 2026-11 pushed 146 lines` (also `backfill` and `nightly`): a month was read and sent.
-- `Sales sync: incremental 2026-11 unchanged, no push (146 lines)`: the month is the same as the last time, so nothing was sent. This is the normal quiet state.
+- `Sales sync: incremental 2026-11 pushed 146 lines (read 3.1 s, 0.5 MB)` (also `backfill` and `nightly`): a month was read and sent. The numbers are how long Tally took to answer and how much it sent.
+- `Sales sync: incremental 2026-11 unchanged, no push (146 lines, read 3.1 s, 0.5 MB)`: the month is the same as the last time, so nothing was sent. This is the normal quiet state.
 - `Sales sync: backfill complete (365 days)`: the history is fully loaded.
 - `Sales sync: off`: the setting is off.
 - `Sales sync: Tally is not reachable; will try again`: Tally is closed or its HTTP server is off. Nothing to do; it tries again by itself.
 - `Sales sync: Tally was too slow to read 2026-10; will try again`: Tally did not answer within 2 minutes. It is not asked again at once.
-- `Sales sync: Tally needed 45 s to read a month; the incremental interval is now 60 minutes`: Tally is slow, so the sync reads less often. Logged at most once an hour.
+- `Sales sync: Tally needed 18 s to read a month; the incremental interval is now 60 minutes`: Tally is slow (more than 15 seconds), so the sync reads less often. Logged at most once an hour.
 - `Sales sync: could not read the company name from Tally; nothing is sent until it can`: Tally has no company open.
 - **404** `Sales sync: waiting for the website to be updated`: the website does not have the sales route yet. The sync waits an hour and tries again. Nothing to do on the shop PC.
 - **409** `Sales sync refused: company differs from the one the website already knows`: the website remembers the first Tally company it received. The sync stops for 24 hours. If the shop really moved to another Tally company (for example a new financial-year company), an admin resets the company pin in the Sales data box on the Stock Management page, and the sync then continues.
 - **422** `Sales sync refused by the website (422): ...`: the website refused a push and says why (for example it would remove most of the stored lines). It is logged at most once an hour and the sync backs off. Tell the developer the reason shown.
 - `Sales sync error: <name>`: an unexpected problem inside the sales step. The stock feeder keeps running. Logged at most once every 10 minutes.
+
+## What to watch at the shop after the update
+
+Reading sales is much lighter than the stock export (about a third of its time), and it is spread out, but the shop PC may be slower than a laptop. For the first days look for these two signs:
+
+1. **Staff noticing Tally pause** for a few seconds about every half hour while stock is moving, or for several minutes in the evening while the history loads.
+2. **The log**: a line `Sales sync: Tally needed N s to read a month` in `logs/feeder.log`, or the existing `Item stock export completed in X s` lines getting slower than before the update.
+
+If Tally ever lags, put `SALES_SYNC=off` in the shop's `.env`, save, and restart the feeder (see above). The stock feeder is not affected either way, and you can switch the sales sync on again later.
 
 ## If something looks wrong
 

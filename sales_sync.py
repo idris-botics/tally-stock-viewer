@@ -38,7 +38,9 @@ STATE_VERSION = 2
 
 NIGHTLY_MONTHS = 3                    # nightly re-reads the current month and the 2 before it
 MIN_CYCLES_BETWEEN_MONTHS = 2
-SLOW_READ_SECONDS, FAST_READ_SECONDS = 40.0, 10.0
+SLOW_READ_SECONDS, FAST_READ_SECONDS = 15.0, 10.0   # a month read slower than this is slow: the incremental interval doubles
+MAX_QUIET_SECONDS = 2 * 3600          # the current month is read at least this often even when the stock did not move
+DEFAULT_SHOP_HOURS = "10:00-19:30"    # Monday to Saturday; history and the nightly re-check wait for the end of the shop day
 MAX_INTERVAL_MINUTES = 240            # the slow guard never stretches the incremental beyond 4 hours
 MAX_INTERVAL_FACTOR = 64
 REPUSH_AFTER_SECONDS = 24 * 3600      # an unchanged month is still pushed once in 24 hours
@@ -60,6 +62,7 @@ class SalesSettings:
     backfill_days: int = 365
     incremental_minutes: int = 30
     nightly_hour: int = 3
+    shop_hours: str = DEFAULT_SHOP_HOURS    # "" = no limit
 
     @classmethod
     def from_environment(cls):
@@ -79,11 +82,27 @@ class SalesSettings:
             nightly = int(float(os.environ.get("SALES_NIGHTLY_HOUR", "").strip()))
         except ValueError:
             nightly = 3
+        hours = os.environ.get("SALES_SHOP_HOURS", DEFAULT_SHOP_HOURS).strip()
+        try:
+            parse_shop_hours(hours)
+        except ValueError:
+            hours = DEFAULT_SHOP_HOURS
         return cls(
             mode=mode,
             backfill_days=number("SALES_BACKFILL_DAYS", 365, 1, 400),
             incremental_minutes=number("SALES_INCREMENTAL_MINUTES", 30, 1, 1440, too_low_means_default=True),
-            nightly_hour=nightly if 0 <= nightly <= 23 else 3)
+            nightly_hour=nightly if 0 <= nightly <= 23 else 3,
+            shop_hours=hours)
+
+
+def parse_shop_hours(text):
+    """(opens, closes) as times from "10:00-19:30", or None for an empty text (no limit). Raises ValueError for anything else."""
+    if not text or not text.strip():
+        return None
+    opens, closes = (datetime.strptime(part.strip(), "%H:%M").time() for part in text.split("-"))
+    if opens >= closes:
+        raise ValueError("the shop opens after it closes")
+    return opens, closes
 
 
 def sales_url(sync_url):
@@ -229,6 +248,7 @@ class SalesSync:
         self._skip_cycles = 0
         self._since_month = MIN_CYCLES_BETWEEN_MONTHS
         self._interval_factor = 1
+        self._stock_moved = True                        # the very first current-month read happens at once
         self._last_logged = {}
         self._off_logged = False
         self.state = self._load_state()                 # the REAL state: only a real ("on") step ever changes or saves it
@@ -284,8 +304,9 @@ class SalesSync:
             self._log_limited("save", "Sales sync: could not save its state file", level=logging.WARNING)
 
     # ---------------------------------------------------------------- the step
-    def step(self, stock_ok=True):
-        """One cycle's worth of sales work. Returns "incremental", "backfill" or "nightly" when it attempted a step, else None.
+    def step(self, stock_ok=True, stock_changed=True):
+        """One cycle's worth of sales work. `stock_changed` says whether the stock the feeder just exported differs from the cycle
+        before: the current month is only read again when it did (or after MAX_QUIET_SECONDS). Returns "incremental", "backfill" or "nightly" when it attempted a step, else None.
         A dry run reads Tally and logs, but works on a throw-away copy of the state: the real state (and its file) never moves, and
         when the mode changes the next step starts from the real state again."""
         if self.settings.mode == "off":
@@ -296,16 +317,17 @@ class SalesSync:
         if self.settings.mode != "dryrun":
             if self._dry_state is not None:              # just switched from a dry run: forget everything it did
                 self._dry_state = None
-                self._skip_cycles, self._since_month, self._interval_factor = 0, MIN_CYCLES_BETWEEN_MONTHS, 1
-            return self._step(stock_ok)
+                self._skip_cycles, self._since_month, self._interval_factor, self._stock_moved = 0, MIN_CYCLES_BETWEEN_MONTHS, 1, True
+            return self._step(stock_ok, stock_changed)
         real = self.state
         self.state = self._dry_state if self._dry_state is not None else copy.deepcopy(real)
         try:
-            return self._step(stock_ok)
+            return self._step(stock_ok, stock_changed)
         finally:
             self._dry_state, self.state = self.state, real      # keep the copy for the next dry step (a company change may replace it)
 
-    def _step(self, stock_ok):
+    def _step(self, stock_ok, stock_changed):
+        self._stock_moved = self._stock_moved or bool(stock_changed)      # remembered until the current month has been read
         first = not self._started
         self._started = True
         self._since_month += 1
@@ -320,9 +342,9 @@ class SalesSync:
         local = self.clock.local_now()
         if self._incremental_due(now):
             label = "incremental"
-        elif not self.state["backfill_done"] and self._since_month >= MIN_CYCLES_BETWEEN_MONTHS:
+        elif not self.state["backfill_done"] and self._since_month >= MIN_CYCLES_BETWEEN_MONTHS and not self._shop_is_open(local):
             label = "backfill"
-        elif self._nightly_due(local):
+        elif self._nightly_due(local) and not self._shop_is_open(local):
             label = "nightly"
         else:
             return None
@@ -341,8 +363,26 @@ class SalesSync:
         return max(base, min(MAX_INTERVAL_MINUTES, base * self._interval_factor))
 
     def _incremental_due(self, now):
+        """The current month is read when the stock moved since the last read and the interval has passed, or when it has been
+        quiet for MAX_QUIET_SECONDS (never less than the interval itself, which the slow guard may have stretched). The very first
+        read (a fresh state) happens at once."""
         last = _parse_utc(self.state["last_incremental_utc"])
-        return last is None or (now - last).total_seconds() >= self.interval_minutes() * 60
+        if last is None:
+            return True
+        age = (now - last).total_seconds()
+        interval = self.interval_minutes() * 60
+        return age >= max(MAX_QUIET_SECONDS, interval) or (self._stock_moved and age >= interval)
+
+    def _shop_is_open(self, local):
+        """True during shop hours (Monday to Saturday): backfill and the nightly step wait. Sunday counts as closed; an empty
+        setting means no limit."""
+        try:
+            window = parse_shop_hours(self.settings.shop_hours)
+        except ValueError:
+            window = parse_shop_hours(DEFAULT_SHOP_HOURS)
+        if window is None or local.weekday() == 6:
+            return False
+        return window[0] <= local.time() < window[1]
 
     def _nightly_due(self, local):
         return self.state["last_nightly_day"] != local.date().isoformat() and local.hour >= self.settings.nightly_hour
@@ -399,6 +439,8 @@ class SalesSync:
         # 4. success: move the state forward
         self.state["fail_streak"] = 0
         self._skip_cycles = 0
+        if label in ("incremental", "nightly"):
+            self._stock_moved = False                     # the current month has just been read
         if label == "incremental":
             self.state["last_incremental_utc"] = now.isoformat()
         elif label == "nightly":
@@ -420,7 +462,7 @@ class SalesSync:
         first_day, last_day = month_bounds(year, month)
         started = self.clock.monotonic()                        # only the Tally read is timed, never the push
         try:
-            lines, _stats = self.reader.fetch_month(year, month)
+            lines, stats = self.reader.fetch_month(year, month)
         except tally_sales.TallyTimeout:
             self._log_limited("slow", "Sales sync: Tally was too slow to read %s; will try again", key)
             self._failed()
@@ -436,6 +478,7 @@ class SalesSync:
         read_seconds = self.clock.monotonic() - started
         self._note_read_time(read_seconds)
         digest = fingerprint(lines)
+        read_note = "read %.1f s, %.1f MB" % (read_seconds, (stats.get("bytes") or 0) / 1048576.0)     # so a slow Tally shows in the log
         if self.settings.mode == "dryrun":
             logger.info("Sales sync (dry run): %s %s read %d lines in %.1f s (fingerprint %s), would push them", label, key, len(lines),
                         read_seconds, digest[:8])
@@ -443,7 +486,7 @@ class SalesSync:
         entry = self.state["months"].get(key)
         pushed_at = _parse_utc(entry["pushed_utc"]) if entry else None
         if entry and entry["fingerprint"] == digest and pushed_at and (now - pushed_at).total_seconds() < REPUSH_AFTER_SECONDS:
-            logger.info("Sales sync: %s %s unchanged, no push (%d lines)", label, key, len(lines))
+            logger.info("Sales sync: %s %s unchanged, no push (%d lines, %s)", label, key, len(lines), read_note)
             return True
         for piece_from, piece_to, piece_lines in split_range(lines, first_day, last_day):
             payload = {"company": self.state["company"], "from": piece_from.isoformat(), "to": piece_to.isoformat(), "lines": piece_lines}
@@ -459,7 +502,7 @@ class SalesSync:
                 self._website_said(status, text, now)
                 return False
         self.state["months"][key] = {"fingerprint": digest, "pushed_utc": now.isoformat()}
-        logger.info("Sales sync: %s %s pushed %d lines", label, key, len(lines))
+        logger.info("Sales sync: %s %s pushed %d lines (%s)", label, key, len(lines), read_note)
         return True
 
     # ---------------------------------------------------------------- the slow guard

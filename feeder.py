@@ -128,10 +128,24 @@ def _wait(seconds, handled_flag_mtime):
 
 
 _sales = {"sync": None, "last_error": None}
+_stock_seen = {"fingerprint": None}
 SALES_ERROR_LOG_SECONDS = 600
 
 
-def run_sales_step(stock_ok):
+def stock_changed_since_last_cycle():
+    """True when the stock the feeder just saved differs from the one it saved the cycle before. It uses the site's own content hash
+    of the three cache files, so Tally's row order or an identical rewrite is not a change. Any doubt (an error, a first look) counts
+    as a change. The sales sync only reads Tally again when this is True (or after two quiet hours)."""
+    try:
+        fingerprint = site._compute_feeder_fingerprint()
+    except Exception:
+        return True
+    changed = fingerprint != _stock_seen["fingerprint"]
+    _stock_seen["fingerprint"] = fingerprint
+    return changed
+
+
+def run_sales_step(stock_ok, stock_changed=True):
     """One cycle's worth of the shop-side sales sync (sales_sync.py). Imported lazily, so a broken or missing module can never
     stop the stock feeder. Never raises. Returns the seconds the sales work took (0.0 when it did nothing)."""
     started = time.monotonic()
@@ -139,7 +153,7 @@ def run_sales_step(stock_ok):
         if _sales["sync"] is None:
             import sales_sync
             _sales["sync"] = sales_sync.SalesSync.from_environment()
-        label = _sales["sync"].step(stock_ok)
+        label = _sales["sync"].step(stock_ok, stock_changed)
     except Exception as exc:
         now = time.monotonic()
         if _sales["last_error"] is None or now - _sales["last_error"] >= SALES_ERROR_LOG_SECONDS:
@@ -245,7 +259,7 @@ def main():
                 "%s failed (will retry in %ss): %s",
                 ("Full refresh (%s)" % reason) if reason else "Stock export", site.ITEM_EXPORT_INTERVAL, exc,
             )
-        sales_seconds = run_sales_step(cycle_ok)     # at most one small sales step per cycle; never raises
+        sales_seconds = run_sales_step(cycle_ok, stock_changed_since_last_cycle())     # at most one small sales step per cycle; never raises
         _wait(max(1.0, site.ITEM_EXPORT_INTERVAL - sales_seconds) if sales_seconds > 0 else site.ITEM_EXPORT_INTERVAL, flag)
 
 

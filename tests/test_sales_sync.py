@@ -164,8 +164,9 @@ def month_lines(year, month, qty=1, items=1):
 class StubReader:
     """A reader that answers from `lines` ({"YYYY-MM": [line, ...]}; months not listed get month_lines) and records its calls."""
 
-    def __init__(self, clock=None, lines=None, company="Stub Company", read_seconds=0.0, error=None, default=True):
+    def __init__(self, clock=None, lines=None, company="Stub Company", read_seconds=0.0, error=None, default=True, size=0):
         self.clock, self.lines, self.company, self.read_seconds, self.error, self.default = clock, lines if lines is not None else {}, company, read_seconds, error, default
+        self.size = size
         self.calls = []
 
     def company_name(self):
@@ -179,7 +180,7 @@ class StubReader:
             raise self.error
         key = sales_sync.month_key(year, month)
         lines = list(self.lines[key]) if key in self.lines else (month_lines(year, month) if self.default else [])
-        return lines, {"seconds": self.read_seconds, "bytes": 0, "sale_vouchers": len(lines)}
+        return lines, {"seconds": self.read_seconds, "bytes": self.size, "sale_vouchers": len(lines)}
 
 
 class Pusher:
@@ -198,7 +199,7 @@ class Pusher:
 
 
 def make_sync(tmp, reader, pusher, clock, **settings):
-    values = dict(mode="on", backfill_days=100, incremental_minutes=30, nightly_hour=3)
+    values = dict(mode="on", backfill_days=100, incremental_minutes=30, nightly_hour=3, shop_hours="")      # no shop-hours limit unless a test asks
     values.update(settings)
     return sales_sync.SalesSync(state_path=tmp, reader=reader, pusher=pusher, settings=sales_sync.SalesSettings(**values), clock=clock)
 
@@ -830,6 +831,17 @@ class SlowGuard(TempState):
         self.clock.advance(20 * 60)
         self.assertEqual(sync.step(), "incremental")
 
+    def test_the_slow_line_is_15_seconds(self):
+        self.assertEqual(sales_sync.SLOW_READ_SECONDS, 15.0)
+        sync, _reader, _pusher = self.first_incremental(14)
+        self.assertEqual(sync.interval_minutes(), 30)                                          # 14 s is still fine
+
+    def test_a_16_second_read_is_slow(self):
+        with LogCapture() as log:
+            sync, _reader, _pusher = self.first_incremental(16)
+        self.assertEqual(sync.interval_minutes(), 60)
+        self.assertTrue(any("Tally needed 16 s to read a month" in m for m in log.records))
+
     def test_the_interval_goes_on_doubling_up_to_4_hours_and_not_beyond(self):
         sync, reader, _pusher = self.first_incremental(41)
         for expected in (120, 240, 240):
@@ -839,10 +851,10 @@ class SlowGuard(TempState):
 
     def test_a_fast_read_brings_the_configured_interval_back_and_a_middling_one_keeps_it(self):
         sync, reader, _pusher = self.first_incremental(41)
-        reader.read_seconds = 20
+        reader.read_seconds = 12
         self.clock.advance(sync.interval_minutes() * 60 + 60)
         sync.step()
-        self.assertEqual(sync.interval_minutes(), 60)                                          # 10 to 40 seconds: neither faster nor slower
+        self.assertEqual(sync.interval_minutes(), 60)                                          # 10 to 15 seconds: neither faster nor slower
         reader.read_seconds = 5
         self.clock.advance(sync.interval_minutes() * 60 + 60)
         sync.step()
@@ -1194,6 +1206,193 @@ class DryRunLeavesNoTrace(TempState):
         self.assertEqual(pusher.months(), ["2026-03"])
 
 
+class StockMovement(TempState):
+    """The current month is only read again when the stock moved since the last read and the interval has passed, or after two quiet
+    hours. The very first read after a start happens at once. History and the nightly step do not depend on stock movement."""
+
+    def started(self, **settings):
+        reader, pusher = StubReader(self.clock), Pusher()
+        sync = make_sync(self.state_path, reader, pusher, self.clock, backfill_days=1, **settings)
+        sync.state["last_nightly_day"] = TODAY.isoformat()                                   # keep the nightly out of this picture
+        return sync, reader, pusher
+
+    def seconds_until_the_next_read(self, sync, changed_at=(), limit=12 * 3600):
+        """Steps every 3 minutes ('changed_at': the minute numbers at which the stock moved) until a step reads; returns the seconds."""
+        waited = 0
+        while waited < limit:
+            self.clock.advance(180)
+            waited += 180
+            if sync.step(True, (waited // 60) in changed_at):
+                return waited
+        return None
+
+    def test_the_first_step_after_a_start_reads_at_once_even_when_the_stock_did_not_move(self):
+        sync, reader, _pusher = self.started()
+        self.assertIsNone(sync.step(True, False))                                           # the first cycle after a start never reads
+        self.clock.advance(180)
+        self.assertEqual(sync.step(True, False), "incremental")
+        self.assertEqual(reader.calls, [(2026, 3)])
+
+    def test_no_change_means_no_read_until_two_hours_have_passed(self):
+        sync, reader, _pusher = self.started()
+        sync.step(True, False); self.clock.advance(180); sync.step(True, False)              # the first read
+        waited = self.seconds_until_the_next_read(sync)
+        self.assertGreaterEqual(waited, 2 * 3600)
+        self.assertLess(waited, 2 * 3600 + 180)
+        self.assertEqual(len(reader.calls), 2)
+
+    def test_a_change_makes_the_next_read_happen_when_the_interval_has_passed(self):
+        sync, reader, _pusher = self.started()
+        sync.step(True, False); self.clock.advance(180); sync.step(True, False)
+        waited = self.seconds_until_the_next_read(sync, changed_at=(6,))                    # the stock moved at minute 6, long before the 30 minutes
+        self.assertGreaterEqual(waited, 30 * 60)                                            # remembered until the interval has passed
+        self.assertLess(waited, 30 * 60 + 180)
+
+    def test_a_change_right_before_the_interval_is_read_at_the_interval(self):
+        sync, _reader, _pusher = self.started()
+        sync.step(True, False); self.clock.advance(180); sync.step(True, False)
+        waited = self.seconds_until_the_next_read(sync, changed_at=(27,))
+        self.assertGreaterEqual(waited, 30 * 60)
+        self.assertLess(waited, 30 * 60 + 180)
+
+    def test_a_read_uses_up_the_change_so_the_next_quiet_stretch_waits_two_hours_again(self):
+        sync, reader, _pusher = self.started()
+        sync.step(True, False); self.clock.advance(180); sync.step(True, False)
+        first = self.seconds_until_the_next_read(sync, changed_at=(3,))
+        self.assertLess(first, 31 * 60)
+        second = self.seconds_until_the_next_read(sync)
+        self.assertGreaterEqual(second, 2 * 3600)
+        self.assertEqual(len(reader.calls), 3)
+
+    def test_an_interval_longer_than_two_hours_is_never_undercut(self):
+        sync, _reader, _pusher = self.started(incremental_minutes=300)
+        sync.step(True, False); self.clock.advance(180); sync.step(True, True)
+        waited = self.seconds_until_the_next_read(sync, changed_at=tuple(range(1, 400)))
+        self.assertGreaterEqual(waited, 300 * 60)
+
+    def test_history_and_the_nightly_step_ignore_stock_movement(self):
+        reader, pusher = StubReader(self.clock), Pusher()
+        sync = make_sync(self.state_path, reader, pusher, self.clock)                       # 100 days of history, nightly due
+        sync.step(True, False); self.clock.advance(180)
+        labels = []
+        for _ in range(12):
+            labels.append(sync.step(True, False))                                           # the stock never moves
+            self.clock.advance(180)
+        self.assertEqual(labels[0], "incremental")
+        self.assertEqual(labels.count("backfill"), 3)
+        self.assertEqual(labels.count("nightly"), 1)
+
+    def test_the_stock_signal_is_remembered_across_steps_that_cannot_run(self):
+        sync, reader, _pusher = self.started()
+        sync.step(True, False); self.clock.advance(180); sync.step(True, False)
+        self.clock.advance(31 * 60)
+        self.assertIsNone(sync.step(False, True))                                           # the stock cycle failed, but it said the stock moved
+        self.clock.advance(180)
+        self.assertEqual(sync.step(True, False), "incremental")
+
+
+class ShopHours(TempState):
+    """History and the nightly re-check wait while the shop is open (default 10:00-19:30, Monday to Saturday). Sunday counts as closed;
+    an empty setting means no limit. The current month is still read during shop hours."""
+
+    FRIDAY = (2026, 3, 20)
+    SATURDAY = (2026, 3, 21)
+    SUNDAY = (2026, 3, 22)
+
+    def set_local(self, day, hour, minute):
+        self.clock.utc = datetime(*day, hour, minute, tzinfo=timezone.utc) - timedelta(hours=5, minutes=30)
+
+    def runs(self, label, day, hour, minute, hours="10:00-19:30"):
+        if os.path.exists(self.state_path):
+            os.remove(self.state_path)                                                         # a state saved by the call before would change the picture
+        self.set_local(day, hour, minute)
+        reader, pusher = StubReader(self.clock), Pusher()
+        sync = make_sync(self.state_path, reader, pusher, self.clock, incremental_minutes=100000, shop_hours=hours,
+                         backfill_days=100 if label == "backfill" else 1)
+        sync.state["last_incremental_utc"] = self.clock.utc.isoformat()                    # the current month is not due
+        sync.state["last_nightly_day"] = self.clock.local_now().date().isoformat() if label == "backfill" else None
+        self.assertIsNone(sync.step())                                                       # the first cycle after a start
+        return sync.step() == label
+
+    def test_the_boundaries_of_a_weekday(self):
+        for label in ("backfill", "nightly"):
+            self.assertTrue(self.runs(label, self.FRIDAY, 9, 59), (label, "09:59"))
+            self.assertFalse(self.runs(label, self.FRIDAY, 10, 0), (label, "10:00"))
+            self.assertFalse(self.runs(label, self.FRIDAY, 14, 30), (label, "14:30"))
+            self.assertFalse(self.runs(label, self.FRIDAY, 19, 29), (label, "19:29"))
+            self.assertTrue(self.runs(label, self.FRIDAY, 19, 30), (label, "19:30"))
+            self.assertTrue(self.runs(label, self.FRIDAY, 23, 0), (label, "23:00"))
+
+    def test_saturday_counts_as_a_shop_day_and_sunday_does_not(self):
+        for label in ("backfill", "nightly"):
+            self.assertFalse(self.runs(label, self.SATURDAY, 14, 30), (label, "Saturday"))
+            self.assertTrue(self.runs(label, self.SUNDAY, 14, 30), (label, "Sunday"))
+
+    def test_an_empty_setting_means_no_limit(self):
+        for label in ("backfill", "nightly"):
+            self.assertTrue(self.runs(label, self.FRIDAY, 14, 30, hours=""), label)
+
+    def test_another_window_can_be_set(self):
+        for label in ("backfill", "nightly"):
+            self.assertFalse(self.runs(label, self.FRIDAY, 7, 30, hours="07:00-21:00"), label)
+            self.assertTrue(self.runs(label, self.FRIDAY, 21, 0, hours="07:00-21:00"), label)
+
+    def test_the_current_month_is_still_read_during_shop_hours(self):
+        self.set_local(self.FRIDAY, 14, 30)
+        reader, pusher = StubReader(self.clock), Pusher()
+        sync = make_sync(self.state_path, reader, pusher, self.clock, shop_hours="10:00-19:30")
+        sync.step()
+        self.assertEqual(sync.step(), "incremental")
+
+    def test_history_waits_for_the_evening_and_then_loads(self):
+        self.set_local(self.FRIDAY, 18, 0)
+        reader, pusher = StubReader(self.clock), Pusher()
+        sync = make_sync(self.state_path, reader, pusher, self.clock, incremental_minutes=100000, shop_hours="10:00-19:30")
+        sync.state["last_nightly_day"] = "2026-03-20"
+        labels = []
+        for _ in range(40):                                                                   # from 18:00, 3 minutes at a time
+            labels.append(sync.step())
+            self.clock.advance(180)
+        self.assertEqual(labels[:30].count("backfill"), 0)                                  # nothing before 19:30 (30 cycles x 3 minutes)
+        self.assertGreater(labels[30:].count("backfill"), 0)
+
+    def test_the_setting_is_read_from_the_environment(self):
+        for env, expected in (({}, "10:00-19:30"), ({"SALES_SHOP_HOURS": ""}, ""), ({"SALES_SHOP_HOURS": " 08:00-20:00 "}, "08:00-20:00"),
+                              ({"SALES_SHOP_HOURS": "garbage"}, "10:00-19:30"), ({"SALES_SHOP_HOURS": "20:00-08:00"}, "10:00-19:30"),
+                              ({"SALES_SHOP_HOURS": "10:00"}, "10:00-19:30")):
+            with mock.patch.dict(os.environ, env):
+                if not env:
+                    os.environ.pop("SALES_SHOP_HOURS", None)
+                self.assertEqual(sales_sync.SalesSettings.from_environment().shop_hours, expected, env)
+
+    def test_parse_shop_hours(self):
+        self.assertIsNone(sales_sync.parse_shop_hours(""))
+        opens, closes = sales_sync.parse_shop_hours("10:00-19:30")
+        self.assertEqual((opens.hour, opens.minute, closes.hour, closes.minute), (10, 0, 19, 30))
+        for bad in ("10:00", "x-y", "19:30-10:00", "10:00-10:00", "25:00-26:00"):
+            with self.assertRaises(ValueError):
+                sales_sync.parse_shop_hours(bad)
+
+
+class ReadTimingInTheLog(TempState):
+    def test_pushed_and_unchanged_lines_carry_the_read_seconds_and_the_size(self):
+        reader, pusher = StubReader(self.clock, read_seconds=3.1, size=524288), Pusher()
+        sync = make_sync(self.state_path, reader, pusher, self.clock, backfill_days=1)
+        sync.state["last_nightly_day"] = TODAY.isoformat()
+        with LogCapture() as log:
+            sync.step(); self.clock.advance(180); sync.step()
+            self.clock.advance(31 * 60); sync.step()
+        self.assertIn("Sales sync: incremental 2026-03 pushed 3 lines (read 3.1 s, 0.5 MB)", log.text())
+        self.assertIn("Sales sync: incremental 2026-03 unchanged, no push (3 lines, read 3.1 s, 0.5 MB)", log.text())
+
+    def test_the_log_never_holds_an_item_name(self):
+        reader, pusher = StubReader(self.clock, read_seconds=1, size=1000), Pusher()
+        sync = make_sync(self.state_path, reader, pusher, self.clock, backfill_days=1)
+        with LogCapture() as log:
+            sync.step(); self.clock.advance(180); sync.step()
+        self.assertNotIn("ALTO", log.text())
+
+
 # ----------------------------------------------------------------------------------------------- 12. end to end
 class EndToEnd(TempState):
     """The fake Tally over real HTTP, the real website route through the Flask test client."""
@@ -1417,7 +1616,7 @@ class FeederHook(unittest.TestCase):
         self.addCleanup(rig.stop)
         with open(os.path.join(rig.dir, "sales_sync.py"), "w", encoding="utf-8") as handle:
             handle.write("class SalesSync:\n    @classmethod\n    def from_environment(cls):\n        return cls()\n"
-                         "    def step(self, stock_ok=True):\n        raise RuntimeError('sales exploded')\n")
+                         "    def step(self, stock_ok=True, stock_changed=True):\n        raise RuntimeError('sales exploded')\n")
         rig.start()
         self.assertTrue(rig.wait(lambda: len(rig.pushes) >= 4), "the stock push must keep happening")
         log = rig.log()
@@ -1443,6 +1642,37 @@ class FeederHook(unittest.TestCase):
         gaps = [b[0] - a[0] for a, b in zip(rig.pushes, rig.pushes[1:])]
         self.assertTrue(all(1.0 <= g <= 4.5 for g in gaps[1:]), gaps)                          # TALLY_EXPORT_INTERVAL is 2 s in the rig
         print(f"\n  stock pushes with SALES_SYNC=off: gaps {[round(g, 2) for g in gaps]} s (interval 2 s)")
+
+    def test_the_stock_changed_signal_counts_any_doubt_as_a_change(self):
+        copy = make_copy("sales_signal_")
+        self.addCleanup(lambda: shutil.rmtree(copy, ignore_errors=True))
+        code = (
+            "import feeder\n"
+            "values = iter(['a', 'a', 'b', RuntimeError('boom'), 'b'])\n"
+            "def fake():\n    value = next(values)\n    if isinstance(value, Exception):\n        raise value\n    return value\n"
+            "feeder.site._compute_feeder_fingerprint = fake\n"
+            "print('RESULT', [feeder.stock_changed_since_last_cycle() for _ in range(5)])\n")
+        result = subprocess.run([sys.executable, "-c", code], cwd=copy, env=clean_env(LOG_FILE="logs/signal_check.log"), capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr[-800:])
+        self.assertIn("RESULT [True, False, True, True, False]", result.stdout)          # first look, the same, moved, an error, the same as before the error
+
+    def test_the_real_fingerprint_changes_only_when_the_stock_changes(self):
+        copy = make_copy("sales_signal_real_")
+        self.addCleanup(lambda: shutil.rmtree(copy, ignore_errors=True))
+        code = (
+            "import json, feeder\n"
+            "site = feeder.site\n"
+            "def put(rows):\n    site._atomic_json_write(site.ITEM_STOCK_CACHE_JSON, rows)\n"
+            "rows = [{'item_name': 'A', 'qty': 1}, {'item_name': 'B', 'qty': 2}]\n"
+            "out = []\n"
+            "put(rows); out.append(feeder.stock_changed_since_last_cycle())\n"
+            "put(rows); out.append(feeder.stock_changed_since_last_cycle())\n"
+            "put(list(reversed(rows))); out.append(feeder.stock_changed_since_last_cycle())\n"
+            "put([{'item_name': 'A', 'qty': 1}, {'item_name': 'B', 'qty': 1}]); out.append(feeder.stock_changed_since_last_cycle())\n"
+            "print('RESULT', out)\n")
+        result = subprocess.run([sys.executable, "-c", code], cwd=copy, env=clean_env(LOG_FILE="logs/signal_real.log"), capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr[-800:])
+        self.assertIn("RESULT [True, False, False, True]", result.stdout)                 # first look, a rewrite, Tally's order, a real change
 
     def test_importing_feeder_starts_no_thread_and_makes_no_network_call(self):
         copy = make_copy("sales_import_")
