@@ -45,10 +45,12 @@ To compare with Tally by hand: run `tools\shop\SALES_PROBE.bat`. It reads the la
 
 ## Go live on the shop PC
 
-1. Update the shop PC with `SHOP_UPDATE.bat`. The sync starts by itself with the feeder.
-2. First put `SALES_SYNC=dryrun` in the shop's `.env`, restart the feeder, and look at `logs/feeder.log` for one day. You should see lines like `Sales sync (dry run): incremental 2026-11 read 146 lines ... would push them`. Nothing is sent in this mode.
-3. When the log looks right, change it to `SALES_SYNC=on` (or remove the line) and restart the feeder. After a few minutes the Sales data box on the Stock Management page starts to fill, newest month first.
-4. If Tally ever feels slow while the history loads, put `SALES_SYNC=off` and restart the feeder. The stock feeder is not affected either way.
+The sync reads its `SALES_*` settings **once, when the feeder starts**. After you change a line in the shop's `.env` you must restart the feeder, or nothing changes. To restart it: double-click `SHOP_UPDATE.bat` again (it stops and starts the feeder and checks it pushed), or open Task Scheduler, right-click the feeder task and choose End, then right-click it again and choose Run.
+
+1. Update the shop PC with `SHOP_UPDATE.bat`. This restarts the feeder, and the sync starts by itself. With no `SALES_SYNC` line in `.env` the sync is **on**, so do step 2 before this update if you want to watch it first.
+2. Open the shop's `.env` (in the feeder folder, the one with `feeder.py`), add the line `SALES_SYNC=dryrun`, save it, and restart the feeder as described above. Look at `logs/feeder.log` for one day. You should see lines like `Sales sync (dry run): incremental 2026-11 read 146 lines ... would push them`. Nothing is sent in this mode. **A dry run changes nothing:** it saves no progress, so you can leave it on for as long as you like, and switching to `on` afterwards starts from the very beginning.
+3. When the log looks right, change that line to `SALES_SYNC=on` (or delete the line), save, and restart the feeder. After a few minutes the Sales data box on the Stock Management page starts to fill, newest month first.
+4. If Tally ever feels slow while the history loads, change the line to `SALES_SYNC=off`, save, and restart the feeder. The stock feeder is not affected either way.
 
 ## What the log lines mean (logs/feeder.log)
 

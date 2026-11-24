@@ -19,6 +19,7 @@ month, and an unchanged month is not pushed again (except once every 24 hours).
 Nothing runs on import: no thread, no network call. Creating a SalesSync only reads its small state file.
 """
 import calendar
+import copy
 import hashlib
 import json
 import logging
@@ -230,7 +231,8 @@ class SalesSync:
         self._interval_factor = 1
         self._last_logged = {}
         self._off_logged = False
-        self.state = self._load_state()
+        self.state = self._load_state()                 # the REAL state: only a real ("on") step ever changes or saves it
+        self._dry_state = None                          # a dry run walks this throw-away copy instead
 
     @classmethod
     def from_environment(cls):
@@ -283,12 +285,27 @@ class SalesSync:
 
     # ---------------------------------------------------------------- the step
     def step(self, stock_ok=True):
-        """One cycle's worth of sales work. Returns "incremental", "backfill" or "nightly" when it attempted a step, else None."""
+        """One cycle's worth of sales work. Returns "incremental", "backfill" or "nightly" when it attempted a step, else None.
+        A dry run reads Tally and logs, but works on a throw-away copy of the state: the real state (and its file) never moves, and
+        when the mode changes the next step starts from the real state again."""
         if self.settings.mode == "off":
             if not self._off_logged:
                 self._off_logged = True
                 logger.info("Sales sync: off")
             return None
+        if self.settings.mode != "dryrun":
+            if self._dry_state is not None:              # just switched from a dry run: forget everything it did
+                self._dry_state = None
+                self._skip_cycles, self._since_month, self._interval_factor = 0, MIN_CYCLES_BETWEEN_MONTHS, 1
+            return self._step(stock_ok)
+        real = self.state
+        self.state = self._dry_state if self._dry_state is not None else copy.deepcopy(real)
+        try:
+            return self._step(stock_ok)
+        finally:
+            self._dry_state, self.state = self.state, real      # keep the copy for the next dry step (a company change may replace it)
+
+    def _step(self, stock_ok):
         first = not self._started
         self._started = True
         self._since_month += 1

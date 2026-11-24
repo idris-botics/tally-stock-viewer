@@ -1094,6 +1094,106 @@ class Modes(TempState):
         self.assertRegex(dry[0], r"incremental 2026-03 read 3 lines in 2\.0 s \(fingerprint [0-9a-f]{8}\)")
 
 
+class DryRunLeavesNoTrace(TempState):
+    """A dry run only reads and logs. Whatever it 'does' must not move the saved progress, so that switching to "on" loads the whole
+    history and runs today's nightly step as if the dry run had never happened."""
+
+    def dry_run(self, steps=14, walked=4, **settings):
+        reader, pusher = StubReader(self.clock), Pusher()
+        sync = make_sync(self.state_path, reader, pusher, self.clock, mode="dryrun", **settings)
+        before = dict(sync.state)
+        for _ in range(steps):                                                                # enough to walk the whole backfill and the nightly
+            sync.step()
+            self.clock.advance(180)
+        self.assertEqual(pusher.calls, [])
+        self.assertGreaterEqual(len(set(reader.calls)), walked, "the dry run really walked the months")
+        return sync, before
+
+    def assert_a_full_start_after_the_switch(self, sync, pusher, log, steps=16):
+        for _ in range(steps):
+            sync.step()
+            self.clock.advance(180)
+        self.assertEqual(pusher.months()[:4], ["2026-03", "2026-02", "2026-01", "2025-12"])   # the current month, then the history newest first
+        self.assertEqual(sorted(set(pusher.months())), ["2025-12", "2026-01", "2026-02", "2026-03"])
+        self.assertTrue(sync.state["backfill_done"])
+        self.assertEqual(sync.state["last_nightly_day"], TODAY.isoformat())                  # the nightly step ran that day
+        self.assertTrue(any("Sales sync: nightly" in m for m in log.records))
+        self.assertTrue(any("backfill complete" in m for m in log.records))
+
+    def test_switching_from_dryrun_to_on_on_the_same_object_starts_from_the_real_state(self):
+        sync, before = self.dry_run()
+        self.assertEqual(sync.state, before)                                                  # the real state did not move
+        pusher = Pusher()
+        sync._pusher = pusher
+        sync.settings.mode = "on"
+        with LogCapture() as log:
+            self.assert_a_full_start_after_the_switch(sync, pusher, log)
+
+    def test_switching_from_dryrun_to_on_in_a_new_object_starts_from_the_real_state(self):
+        self.dry_run()
+        self.assertFalse(os.path.exists(self.state_path))
+        pusher = Pusher()
+        sync = make_sync(self.state_path, StubReader(self.clock), pusher, self.clock, mode="on")
+        with LogCapture() as log:
+            self.assert_a_full_start_after_the_switch(sync, pusher, log)
+
+    def test_a_dry_run_leaves_a_missing_state_file_missing(self):
+        self.dry_run()
+        self.assertFalse(os.path.exists(self.state_path))
+        self.assertEqual(os.listdir(self.dir), [])
+
+    def test_a_dry_run_leaves_an_existing_state_file_byte_identical(self):
+        reader, pusher = StubReader(self.clock), Pusher()
+        live = make_sync(self.state_path, reader, pusher, self.clock, mode="on")
+        for _ in range(4):
+            live.step()
+            self.clock.advance(180)
+        with open(self.state_path, "rb") as handle:
+            saved = handle.read()
+        self.dry_run(steps=20, walked=2)
+        with open(self.state_path, "rb") as handle:
+            self.assertEqual(handle.read(), saved)
+        self.assertEqual(os.listdir(self.dir), ["sales_sync_state.json"])                    # and no temp file beside it
+        restarted = make_sync(self.state_path, StubReader(self.clock), Pusher(), self.clock, mode="dryrun")
+        restarted.step(); restarted.step()
+        with open(self.state_path, "rb") as handle:
+            self.assertEqual(handle.read(), saved)
+
+    def test_a_dry_run_that_meets_another_company_or_a_failure_still_changes_nothing(self):
+        live = make_sync(self.state_path, StubReader(self.clock, company="First Co"), Pusher(), self.clock, mode="on")
+        for _ in range(4):
+            live.step()
+            self.clock.advance(180)
+        with open(self.state_path, "rb") as handle:
+            saved = handle.read()
+        sync = make_sync(self.state_path, StubReader(self.clock, company="Second Co"), Pusher(), self.clock, mode="dryrun")
+        for _ in range(6):
+            sync.step()
+            self.clock.advance(180)
+        failing = make_sync(self.state_path, StubReader(self.clock, error=tally_sales.TallyReadError("boom")), Pusher(), self.clock, mode="dryrun")
+        for _ in range(6):
+            failing.step()
+            self.clock.advance(180)
+        with open(self.state_path, "rb") as handle:
+            self.assertEqual(handle.read(), saved)
+        self.assertEqual(failing.state["fail_streak"], 0)
+        again = make_sync(self.state_path, StubReader(self.clock, company="First Co"), Pusher(), self.clock, mode="on")
+        self.assertEqual(again.state["company"], tally_sales.company_hash("First Co"))
+
+    def test_a_failure_during_a_dry_run_does_not_delay_the_first_real_step(self):
+        reader = StubReader(self.clock, error=tally_sales.TallyReadError("boom"))
+        pusher = Pusher()
+        sync = make_sync(self.state_path, reader, pusher, self.clock, mode="dryrun")
+        for _ in range(6):
+            sync.step()
+            self.clock.advance(180)
+        reader.error = None
+        sync.settings.mode = "on"
+        sync._pusher = pusher
+        self.assertEqual(sync.step(), "incremental")                                          # no back-off left over from the dry run
+        self.assertEqual(pusher.months(), ["2026-03"])
+
+
 # ----------------------------------------------------------------------------------------------- 12. end to end
 class EndToEnd(TempState):
     """The fake Tally over real HTTP, the real website route through the Flask test client."""
