@@ -127,6 +127,28 @@ def _wait(seconds, handled_flag_mtime):
             return
 
 
+_sales = {"sync": None, "last_error": None}
+SALES_ERROR_LOG_SECONDS = 600
+
+
+def run_sales_step(stock_ok):
+    """One cycle's worth of the shop-side sales sync (sales_sync.py). Imported lazily, so a broken or missing module can never
+    stop the stock feeder. Never raises. Returns the seconds the sales work took (0.0 when it did nothing)."""
+    started = time.monotonic()
+    try:
+        if _sales["sync"] is None:
+            import sales_sync
+            _sales["sync"] = sales_sync.SalesSync.from_environment()
+        label = _sales["sync"].step(stock_ok)
+    except Exception as exc:
+        now = time.monotonic()
+        if _sales["last_error"] is None or now - _sales["last_error"] >= SALES_ERROR_LOG_SECONDS:
+            _sales["last_error"] = now
+            logger.warning("Sales sync error: %s", type(exc).__name__)
+        return 0.0
+    return (time.monotonic() - started) if label else 0.0
+
+
 class NewItemWatch:
     """Decides when an in-stock item missing from the hierarchy justifies a full refresh.
     Names still unmatched after a refresh are 'known' (e.g. stock outside any car
@@ -195,6 +217,7 @@ def main():
             reason = "manual"
         else:
             reason = None
+        cycle_ok = False
         try:
             if reason:
                 run_full_refresh(reason)
@@ -216,12 +239,14 @@ def main():
                         watch.attempt_finished(True, seconds)
                 else:
                     push_to_cloud()
+            cycle_ok = True
         except Exception as exc:  # one bad cycle must never end the process
             logger.exception(
                 "%s failed (will retry in %ss): %s",
                 ("Full refresh (%s)" % reason) if reason else "Stock export", site.ITEM_EXPORT_INTERVAL, exc,
             )
-        _wait(site.ITEM_EXPORT_INTERVAL, flag)
+        sales_seconds = run_sales_step(cycle_ok)     # at most one small sales step per cycle; never raises
+        _wait(max(1.0, site.ITEM_EXPORT_INTERVAL - sales_seconds) if sales_seconds > 0 else site.ITEM_EXPORT_INTERVAL, flag)
 
 
 if __name__ == "__main__":

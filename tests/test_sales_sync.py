@@ -499,7 +499,7 @@ class Scheduling(TempState):
         for _ in range(8):
             self.clock.advance(180)
             sync.step()
-        self.assertEqual(reader.calls.count(reader.calls[2]), 2)                              # the same chunk read again, never skipped
+        self.assertEqual(reader.calls.count(reader.calls[1]), 2)                              # the failed chunk (call 1) read again, never skipped
 
     def test_the_incremental_interval_and_the_nightly_once_a_day(self):
         reader, pusher = StubReader(self.clock, one_line_per_day), Pusher()
@@ -594,8 +594,10 @@ class Splitting(TempState):
         sync = make_sync(self.state_path, reader, pusher, self.clock, backfill_days=1)
         sync.step(); sync.step()                                                                # incremental: three days of 2000 lines: no split
         self.assertEqual(len(pusher.calls), 1)
-        self.clock.advance(86400)
+        self.clock.advance(1200)
+        sync.step()                                                                             # the incremental is due again, it goes first
         pusher.calls.clear()
+        self.clock.advance(180)
         sync.step()                                                                             # nightly: 36 days x 2000 = 72000 lines
         self.assertGreater(len(pusher.calls), 2)
         for call in pusher.calls:
@@ -673,7 +675,7 @@ class WebsiteAnswers(TempState):
     def test_413_halves_the_chunk(self):
         sync, _r, _p = self.started([(200, "{}"), (413, "too large")])
         sync.state["chunk_days"] = 40
-        self.cycles(sync, 1)
+        self.cycles(sync, 2)                                                                    # the incremental (200), then a chunk (413)
         self.assertEqual(sync.state["chunk_days"], 20)
 
     def test_503_is_retried_next_cycle_without_backing_off(self):
