@@ -407,6 +407,10 @@
         var search = searchBox(s.q, function (value) { s.q = value; s.cars = CARS_FIRST; s.thinPages = 1; s.pickView = true; load(); }, "Search a design or car",
             "Type part of a design name or a car, then press Search. If nothing matches here, it jumps to the list that has matches.");
         var list = el("div", {});
+        if (first.history_note) {
+            list.appendChild(el("div", { class: "notice historynote", id: "historyNote", style: "display:block;position:static;color:var(--warn-text);background:var(--warn-bg)", role: "status",
+                title: "The shop sends its sales history newest month first, so older sales are still arriving.", text: first.history_note }));
+        }
         if (switchedFor) {
             list.appendChild(el("div", { class: "notice info", style: "display:block;position:static" }, ["Nothing in the list you were on matches \u201c" + switchedFor + "\u201d, so this shows \u201c" + names[s.view] + "\u201d, which does."]));
         }
@@ -627,17 +631,22 @@
         var body = document.getElementById("salesBody"), reset = document.getElementById("salesReset");
         try {
             var data = await getData({}, "/sales_status");
+            // what the shop last did: received, refused (only while the refusal is newer than the last accepted push), and silence
+            var news = [];
+            if (data.no_news_line) { news.push(el("div", { class: "notice error", id: "salesNoNews", role: "alert", style: "display:block;position:static;margin:6px 0", text: data.no_news_line })); }
+            if (data.refused_line) { news.push(el("div", { class: "notice error", id: "salesRefused", role: "alert", style: "display:block;position:static;margin:6px 0", text: data.refused_line })); }
             if (!data.has_data) {
-                body.textContent = data.company_pin ? "The shop has registered a Tally company but no sales lines are stored." : "No sales data received yet.";
+                body.replaceChildren.apply(body, news.concat([el("div", { text: data.company_pin ? "The shop has registered a Tally company but no sales lines are stored." : "No sales data received yet." })]));
             } else {
                 var months = data.months.map(function (m) { return el("tr", {}, [el("td", { text: m.month }), el("td", { text: String(m.vouchers) }), el("td", { text: String(m.sold) }), el("td", { text: String(m.returned) }), el("td", { text: String(m.net) })]); });
-                body.replaceChildren(
-                    el("div", { text: "Last update " + (data.last_sync_ist || "unknown") + " (covering " + when(data.last_from) + " to " + when(data.last_to) + ")." }),
+                body.replaceChildren.apply(body, news.concat([
+                    data.last_received_line ? el("div", { id: "salesReceived", text: data.last_received_line }) : el("div", { text: "Last update " + (data.last_sync_ist || "unknown") + "." }),
+                    el("div", { text: "The last push covered " + when(data.last_from) + " to " + when(data.last_to) + (data.sales_covered_from ? "; the history reaches back to " + when(data.sales_covered_from) : "") + "." }),
                     el("div", { text: "Days stored: " + when(data.first_day) + " to " + when(data.last_day) + ". " + data.total_lines + " lines, " + data.vouchers + " sales slips, " + data.items + " designs." }),
                     el("table", { style: "margin-top:8px;border-collapse:collapse;font-size:13px", title: "Units sold, returned and net, by month" }, [
                         el("tr", {}, ["Month", "Slips", "Sold", "Returned", "Net"].map(function (h) { return el("th", { text: h, style: "text-align:left;padding:2px 10px 2px 0" }); }))].concat(months)),
                     data.unmatched_count ? el("div", { class: "meta", title: "Sold design names that match no catalogue or stock item. These cannot be linked to a car.",
-                        text: data.unmatched_count + " sold design" + (data.unmatched_count === 1 ? "" : "s") + " match no item in the catalogue, for example: " + data.unmatched_samples.slice(0, 5).join(", ") + (data.unmatched_count > 5 ? ", \u2026" : "") }) : el("div", { class: "meta", text: "Every sold design matches the catalogue." }));
+                        text: data.unmatched_count + " sold design" + (data.unmatched_count === 1 ? "" : "s") + " match no item in the catalogue, for example: " + data.unmatched_samples.slice(0, 5).join(", ") + (data.unmatched_count > 5 ? ", \u2026" : "") }) : el("div", { class: "meta", text: "Every sold design matches the catalogue." })]));
             }
             reset.style.display = data.company_pin ? "" : "none";
             if (data.company_pin) { reset.textContent = "Reset company pin"; reset.title = "Forget which Tally company the sales data belongs to (pin " + data.company_pin + "). The data stays; the next sales push sets a new company."; }

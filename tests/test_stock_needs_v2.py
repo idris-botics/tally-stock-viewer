@@ -471,6 +471,136 @@ class Banner(V2Base):
         self.assertTrue(data["calm"])
 
 
+COMPANY = "ab" * 32
+
+
+class RealHistoryCoverage(V2Base):
+    """The Needs lists decide whether the sales history reaches back over the window from what the shop's pushes actually covered
+    (sales_covered_from), not from the oldest day that happens to hold a sale."""
+
+    def covered(self, day_text):
+        self.sql("INSERT OR REPLACE INTO capture_meta VALUES ('sales_covered_from', ?)", (day_text,))
+        self.app_module._stock_mgmt_cache_clear()
+
+    def test_no_sales_at_all_keeps_the_old_banner_and_has_no_note(self):
+        data = self.get("sold")
+        self.assertIsNone(data["history_note"])
+        self.assertIn("No sales history yet", data["banner"]["text"])
+
+    def test_sales_that_do_not_reach_back_over_the_window_get_the_loading_note(self):
+        self.sale(self.item("CARA", 1), 3, 10)                                      # the oldest sale is 10 days old, the window is 90
+        data = self.get("sold")
+        self.assertEqual(data["history_note"], f"Based on sales since {day(10)}. Older history is still loading.")
+        self.assertEqual(self.get("thin")["history_note"], data["history_note"])      # the note is on every list
+
+    def test_the_note_uses_what_the_shop_covered_and_goes_when_the_window_is_reached(self):
+        self.sale(self.item("CARA", 1), 3, 10)
+        self.covered(day(40))                                                       # pushes reached 40 days back (and found sales only 10 days ago)
+        data = self.get("sold")
+        self.assertEqual(data["history_note"], f"Based on sales since {day(40)}. Older history is still loading.")
+        self.covered(day(89))                                                       # the window is 90 days: today and the 89 days before it
+        self.assertIsNone(self.get("sold")["history_note"])
+        self.setting(window_days=365)
+        self.assertEqual(self.get("sold")["history_note"], f"Based on sales since {day(89)}. Older history is still loading.")
+
+    def test_coverage_decides_whether_stock_changes_fill_in_for_missing_sales(self):
+        a1 = self.item("CARA", 1)
+        self.sale(self.item("CARA", 2), 3, 10)                                      # some sales exist, none for a1
+        self.event(a1, 2, 0, 5)                                                     # a1 dropped to zero 5 days ago and is not in stock
+        self.assertEqual(self.names(self.get("sold")), [self.item("CARA", 2), a1])   # history is short: the stock change fills in
+        self.covered(day(120))                                                      # the shop's history really covers the window: no sales means no sales
+        self.assertEqual(self.names(self.get("sold")), [self.item("CARA", 2)])
+
+    def test_older_data_without_a_recorded_coverage_falls_back_to_the_first_stored_day(self):
+        self.sale(self.item("CARA", 1), 3, 120)
+        self.assertIsNone(self.get("sold")["history_note"])
+        self.assertEqual(self.get("sold")["banner"]["text"], f"Sales history from {day(120)} (120 days).")
+
+
+class CachesAreFresh(V2Base):
+    """Needs and Slow answers are cached for 60 seconds. Each test warms the cache with a read, changes something through the REAL
+    route or intake (never by clearing the cache itself), and reads again: the answer must already be the new one."""
+
+    def push_sales(self, lines, frm, to):
+        response = self.anon.post("/admin/intake/sales", json={"company": COMPANY, "from": frm, "to": to, "lines": lines}, headers=INTAKE_HEADERS)
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+
+    def sale_line(self, name, qty, days_ago, voucher="aaaaaaaa"):
+        return {"v": voucher, "d": day(days_ago), "k": "sale", "i": name, "q": qty}
+
+    def warm(self):
+        self.assertTrue(self.app_module._stock_mgmt_cache, "the read just before warmed the cache")
+
+    def cold(self):
+        self.assertFalse(self.app_module._stock_mgmt_cache, "the change emptied the cache by itself")
+
+    def slow(self, days=60):
+        response = self.admin.get(BASE + "/data", query_string={"tab": "slow", "days": days})
+        self.assertEqual(response.status_code, 200)
+        return response.get_json()
+
+    def test_a_saved_setting_is_used_by_the_next_read(self):
+        self.sale(self.item("CARA", 1), 1, 10)
+        self.app_module._stock_mgmt_cache_clear()
+        self.assertEqual(self.names(self.get("sold")), [self.item("CARA", 1)])      # warms the cache
+        self.warm()
+        self.assertEqual(self.admin.post(BASE + "/settings", json={"min_sold": 2}).status_code, 200)
+        self.cold()
+        self.assertEqual(self.names(self.get("sold")), [])                         # min_sold 2: one unit no longer counts
+        self.assertEqual(self.get("sold")["settings"]["min_sold"], 2)
+        self.assertEqual(self.admin.post(BASE + "/settings", json={"min_sold": 1, "window_days": 30}).status_code, 200)
+        self.assertEqual(self.get("sold")["settings"]["window_days"], 30)
+
+    def test_adding_and_removing_an_order_list_entry_is_seen_by_the_next_read(self):
+        a1 = self.item("CARA", 1)
+        self.sale(a1, 3, 10)
+        self.app_module._stock_mgmt_cache_clear()
+        self.assertFalse(self.get("sold")["rows"][0]["on_order_list"])             # warms the cache
+        self.warm()
+        self.assertEqual(self.admin.post(BASE + "/draft", json={"action": "add", "item_name": a1, "qty": 2}).status_code, 200)
+        self.cold()
+        self.assertTrue(self.get("sold")["rows"][0]["on_order_list"])
+        self.warm()
+        self.assertEqual(self.admin.post(BASE + "/draft", json={"action": "remove", "item_key": a1}).status_code, 200)
+        self.cold()
+        self.assertFalse(self.get("sold")["rows"][0]["on_order_list"])
+
+    def test_an_accepted_sales_push_is_seen_by_the_next_read_of_needs_and_slow(self):
+        a1 = self.item("CARA", 1)
+        self.in_stock(self.item("CARA", 2))
+        self.assertEqual(self.names(self.get("sold")), [])                          # warms the Needs cache
+        self.assertEqual(self.slow()["source"], "stock_changes")                    # and the Slow cache: no sales history yet
+        self.warm()
+        self.push_sales([self.sale_line(a1, 3, 5), self.sale_line(self.item("CARA", 2), 1, 70, voucher="bbbbbbbb")], day(100), day(0))
+        self.cold()
+        self.assertEqual(self.names(self.get("sold")), [a1])
+        self.assertIsNone(self.get("sold")["history_note"])                         # the push covered 100 days back
+        self.assertEqual(self.slow()["source"], "sales")                            # the history now reaches back 60 days
+
+    def test_a_stock_push_is_seen_by_the_next_read(self):
+        a1 = self.item("CARA", 1)
+        self.sale(a1, 3, 10)
+        full = catalogue_payload(self.cars, self.items_per_car)
+        self.assertEqual(self.anon.post("/admin/intake/sync_data", json=full, headers=FORCE).status_code, 200)    # everything in stock
+        self.assertEqual(self.names(self.get("sold")), [])                          # warms the cache: a1 is in stock
+        version = self.app_module.get_data_versions()["data_version"]
+        fewer = dict(full, item_stock=[row for row in full["item_stock"] if row["item_name"] != a1])
+        self.assertEqual(self.anon.post("/admin/intake/sync_data", json=fewer, headers=FORCE).status_code, 200)
+        self.assertNotEqual(self.app_module.get_data_versions()["data_version"], version)      # the cache key moved on with the data
+        self.assertEqual(self.names(self.get("sold")), [a1])                        # a1 sold out
+        self.assertEqual(self.anon.post("/admin/intake/sync_data", json=full, headers=FORCE).status_code, 200)
+        self.assertEqual(self.names(self.get("sold")), [])
+
+    def test_resetting_the_company_is_seen_by_the_next_read(self):
+        self.sale(self.item("CARA", 1), 3, 10)                                      # a stored sale, but no coverage is recorded
+        self.push_sales([self.sale_line(self.item("CARA", 1), 3, 10)], day(120), day(0))
+        self.assertIsNone(self.get("sold")["history_note"])                         # warms the cache: the push covered the window
+        self.warm()
+        self.assertEqual(self.admin.post(BASE + "/sales_reset_company", json={"confirm": "RESET"}).status_code, 200)
+        self.cold()
+        self.assertEqual(self.get("sold")["history_note"], f"Based on sales since {day(10)}. Older history is still loading.")
+
+
 class AdminOnlyV2(V2Base):
     def test_dealers_and_logged_out_visitors_are_denied_on_the_data_and_settings_routes(self):
         for client, allowed in ((self.dealer, (403,)), (self.anon, (401, 403))):

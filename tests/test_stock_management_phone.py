@@ -282,6 +282,51 @@ class PhoneUi(unittest.TestCase):
         with self.db.get_connection() as conn:
             self.assertEqual(conn.execute("SELECT value FROM stock_mgmt_settings WHERE key = 'keep_max'").fetchone()[0], "2")
 
+    def meta(self, **values):
+        with self.db.get_connection() as conn:
+            for key, value in values.items():
+                conn.execute("INSERT OR REPLACE INTO capture_meta VALUES (?, ?)", (key, value))
+        self.app_module._stock_mgmt_cache_clear()
+
+    def stamp(self, hours_ago):
+        return (NOW - timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%S")
+
+    def sales_box(self, page):
+        page.locator("#salesBox > summary").click()
+        page.wait_for_selector("#salesBody > div")                                 # the box replaced its starting text with what the site answered
+        return page.inner_text("#salesBody")
+
+    def test_the_history_note_shows_while_the_history_is_still_loading_and_goes_when_it_reaches_the_window(self):
+        page = self.open("phone-390", "needs")              # the fixture's sales start 10 days ago, the window is 90 days, no coverage is recorded
+        self.assertEqual(page.locator("#historyNote").count(), 1)
+        self.assertEqual(page.inner_text("#historyNote"), f"Based on sales since {day(10)}. Older history is still loading.")
+        self.assertGreater(page.locator("#panel .bin").count(), 0)                    # the lists are still there below it
+        self.meta(sales_covered_from=day(200))              # the shop's pushes reached back far enough
+        page = self.open("phone-390", "needs")
+        self.assertEqual(page.locator("#historyNote").count(), 0)
+        self.assertGreater(page.locator("#panel .bin").count(), 0)
+
+    def test_the_sales_box_shows_received_refused_and_silent_shop_lines_only_when_they_apply(self):
+        # nothing recorded yet (older data): no warning and no refusal
+        page = self.open("phone-390", "needs")
+        self.sales_box(page)
+        self.assertEqual((page.locator("#salesNoNews").count(), page.locator("#salesRefused").count()), (0, 0))
+        # received 40 hours ago, and a refusal after that: both warnings show
+        self.meta(sales_last_accepted='{"utc": "%s", "from": "2026-02-01", "to": "2026-02-28", "lines": 5}' % self.stamp(40),
+                  sales_last_refused='{"utc": "%s", "status": 409, "reason": "company mismatch", "from": null, "to": null, "lines": null}' % self.stamp(2))
+        page = self.open("phone-390", "needs")
+        self.sales_box(page)
+        self.assertIn("Last sales received: 2026-03-18 20:00", page.inner_text("#salesReceived"))
+        self.assertEqual(page.inner_text("#salesNoNews"), "No sales received from the shop for 40 hours. Check the shop PC and Tally.")
+        self.assertEqual(page.inner_text("#salesRefused"), "The shop's last push was refused (409) on 2026-03-20 10:00: company mismatch")
+        self.assertTrue(page.locator("#salesRefused").is_visible() and page.locator("#salesNoNews").is_visible())
+        # a later accepted push: the refusal and the warning are gone
+        self.meta(sales_last_accepted='{"utc": "%s", "from": "2026-03-01", "to": "2026-03-31", "lines": 9}' % self.stamp(1))
+        page = self.open("phone-390", "needs")
+        self.sales_box(page)
+        self.assertEqual((page.locator("#salesNoNews").count(), page.locator("#salesRefused").count()), (0, 0))
+        self.assertIn("Last sales received: 2026-03-20 11:00", page.inner_text("#salesReceived"))
+
     def test_the_tab_counts_show(self):
         page = self.open("phone-390", "needs")
         page.wait_for_function("document.querySelector('[data-count=order]').textContent === '3'")

@@ -6584,7 +6584,8 @@ def _stock_needs_compute(conn, settings):
         for key, name in conn.execute(f"SELECT item_key, MAX(item_name) FROM sales_lines WHERE item_key IN ({','.join('?' for _ in chunk)}) GROUP BY item_key", chunk):
             sales[key]["name"] = name
     first_day = conn.execute("SELECT MIN(day) FROM sales_lines").fetchone()[0]
-    covers = first_day is not None and first_day <= d_window       # the sales history reaches back over the whole window
+    covered_from = _sales_coverage_start(conn, first_day)         # how far back the pushes really reached (the first stored day for older data)
+    covers = first_day is not None and covered_from <= d_window    # the sales history reaches back over the whole window
     zero_events = {row[0]: (row[1], row[2]) for row in conn.execute(
         "SELECT item_key, MAX(item_name), MAX(day_ist) FROM stock_events WHERE qty_after = 0 AND qty_before > 0 GROUP BY item_key")}
     usual = {}
@@ -6661,8 +6662,11 @@ def _stock_needs_compute(conn, settings):
         banner = {"text": f"No sales history yet. This list uses stock changes seen since {tracking['stock_since']}.", "calm": False}
     else:
         banner = {"text": "No sales history yet. Stock changes have not been recorded yet.", "calm": False}
+    history_note = None                                            # sales exist but do not reach back over the window yet
+    if first_day is not None and not covers:
+        history_note = f"Based on sales since {covered_from}. Older history is still loading."
     return {"sold": sold_rows, "last": last_rows, "thin": [row for _key, row in thin], "car_items": car_items, "banner": banner,
-            "tracking": tracking, "settings": settings, "make_row": make_row}
+            "tracking": tracking, "settings": settings, "make_row": make_row, "history_note": history_note}
 
 
 def _stock_group_light(pairs):
@@ -6697,7 +6701,7 @@ def _stock_tab_needs(conn, section, q, page, block, car):
         make_row = data["make_row"]
         payload["rows"] = [make_row(*entry) for entry in payload["rows"]]       # the page's rows only
     payload.update(tab="needs", section=section, block=block, totals={name: len(rows_) for name, rows_ in lists.items()},
-                   settings=data["settings"], tracking=data["tracking"], banner=data["banner"])
+                   settings=data["settings"], tracking=data["tracking"], banner=data["banner"], history_note=data["history_note"])
     return payload
 
 
@@ -7305,6 +7309,66 @@ def _sales_refusal(message, status):
     return jsonify({"error": message, "refused": True}), status
 
 
+# What the Sales data box shows about the shop's pushes. Small JSON texts in capture_meta, never a payload or an item name:
+#   sales_last_accepted {"utc", "from", "to", "lines"}          the last push that was stored
+#   sales_last_refused  {"utc", "status", "reason", "from", "to", "lines"}   the last 409 / 413 / 422 answered AFTER the token was accepted
+#   sales_covered_from  "YYYY-MM-DD"                            how far back the pushes have reached without a gap
+SALES_NO_NEWS_HOURS = 30                   # the shop re-sends at least every 24 hours while it works
+SALES_META_RESET_KEYS = ("sales_company_hash", "sales_covered_from", "sales_last_accepted", "sales_last_refused")
+
+
+def _json_dict(text):
+    try:
+        value = json.loads(text) if text else None
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _sales_record_refusal(conn, status, message, payload=None, clean=None):
+    """Remembers the shop's last refused push. Called only once the intake token was accepted. `clean` (a validated push) or
+    `payload` (whatever the body was, possibly broken) give the range and the number of lines when they can be told."""
+    first = last = count = None
+    if clean is not None:
+        first, last, count = clean["from"], clean["to"], len(clean["rows"])
+    elif isinstance(payload, dict):
+        first = payload.get("from") if _sales_day(payload.get("from")) else None
+        last = payload.get("to") if _sales_day(payload.get("to")) else None
+        count = len(payload["lines"]) if isinstance(payload.get("lines"), list) else None
+    _capture_meta_set(conn, "sales_last_refused", json.dumps({
+        "utc": _stock_now_utc().strftime("%Y-%m-%dT%H:%M:%S"), "status": status, "reason": str(message)[:120],
+        "from": first, "to": last, "lines": count}))
+
+
+def _sales_refused_after_token(message, status, payload=None):
+    """A refusal that happens before the push is applied (too large, invalid): record it, then answer. Recording never changes the answer."""
+    try:
+        with _short_db_connection(SALES_DB_TIMEOUT_SECONDS) as conn:
+            _sales_record_refusal(conn, status, message, payload)
+        _stock_mgmt_cache_clear()
+    except Exception:
+        pass
+    return _sales_refusal(message, status)
+
+
+def _sales_extend_coverage(conn, first, last):
+    """sales_covered_from = the earliest day the pushes have reached WITHOUT A GAP. The first push sets it; a push that touches or
+    overlaps the covered stretch (it ends no earlier than the day before it starts) moves it back; a push after a gap leaves it."""
+    covered = _capture_meta_get(conn, "sales_covered_from")
+    covered_day = _sales_day(covered)
+    if covered_day is None:
+        _capture_meta_set(conn, "sales_covered_from", first)
+    elif first < covered and _sales_day(last) >= covered_day - timedelta(days=1):
+        _capture_meta_set(conn, "sales_covered_from", first)
+
+
+def _sales_coverage_start(conn, first_stored_day):
+    """The day the sales history really reaches back to: what the pushes covered, else (data from before this was recorded) the first
+    stored day."""
+    covered = _capture_meta_get(conn, "sales_covered_from")
+    return covered if _sales_day(covered) is not None else first_stored_day
+
+
 @app.route("/admin/intake/sales", methods=["POST"])
 def intake_sales():
     expected_token = Config.INTAKE_SYNC_TOKEN
@@ -7315,45 +7379,54 @@ def intake_sales():
         return jsonify({"error": "Invalid or missing intake token."}), 403
 
     if request.content_length is not None and request.content_length > SALES_MAX_BODY_BYTES:
-        return _sales_refusal("body too large", 413)
+        return _sales_refused_after_token("body too large", 413)
     raw = request.stream.read(SALES_MAX_BODY_BYTES + 1)
     if len(raw) > SALES_MAX_BODY_BYTES:
-        return _sales_refusal("body too large", 413)
+        return _sales_refused_after_token("body too large", 413)
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
         payload = None
     clean, error = _validate_sales_payload(payload)
     if error is not None:
-        return _sales_refusal(error, 422)
+        return _sales_refused_after_token(error, 422, payload)
 
     force = request.headers.get("X-Intake-Force") == "1"
     rows = clean["rows"]
     if not _SALES_INTAKE_LOCK.acquire(timeout=SALES_LOCK_TIMEOUT_SECONDS):
         return jsonify({"error": "busy"}), 503
     try:
+        refused = None
         with _short_db_connection(SALES_DB_TIMEOUT_SECONDS) as conn:
             pinned = _capture_meta_get(conn, "sales_company_hash")
-            if pinned and pinned != clean["company"]:
-                return _sales_refusal("company mismatch", 409)
             stored = conn.execute("SELECT COUNT(*) FROM sales_lines WHERE day BETWEEN ? AND ?", (clean["from"], clean["to"])).fetchone()[0]
-            if not force and ((not rows and stored >= SALES_GUARD_EMPTY_MIN_STORED)
-                              or (stored >= SALES_GUARD_SHRINK_MIN_STORED and len(rows) * 100 < SALES_GUARD_SHRINK_PERCENT * stored)):
+            if pinned and pinned != clean["company"]:
+                refused = ("company mismatch", 409)
+            elif not force and ((not rows and stored >= SALES_GUARD_EMPTY_MIN_STORED)
+                                or (stored >= SALES_GUARD_SHRINK_MIN_STORED and len(rows) * 100 < SALES_GUARD_SHRINK_PERCENT * stored)):
                 logger.warning("Cloud sales intake: push refused (%d lines pushed, %d stored in %s..%s)",
                                len(rows), stored, clean["from"], clean["to"])
-                return _sales_refusal("this push would remove most of the stored sales lines", 422)
-            if not pinned:
-                _capture_meta_set(conn, "sales_company_hash", clean["company"])
-            deleted = conn.execute("DELETE FROM sales_lines WHERE day BETWEEN ? AND ?", (clean["from"], clean["to"])).rowcount
-            conn.executemany("INSERT OR REPLACE INTO sales_lines (voucher_key, day, kind, item_key, item_name, qty) VALUES (?, ?, ?, ?, ?, ?)", rows)
-            _capture_meta_set(conn, "sales_last_sync_utc", _stock_now_utc().strftime("%Y-%m-%dT%H:%M:%S"))
-            _capture_meta_set(conn, "sales_last_from", clean["from"])
-            _capture_meta_set(conn, "sales_last_to", clean["to"])
-            today = _today_ist()
-            if _capture_meta_get(conn, "last_sales_prune_day_ist") != today:      # once per IST day, never per push
-                conn.execute("DELETE FROM sales_lines WHERE day < ?", (_ist_day_minus(SALES_RETENTION_DAYS),))
-                _capture_meta_set(conn, "last_sales_prune_day_ist", today)
+                refused = ("this push would remove most of the stored sales lines", 422)
+            if refused:
+                _sales_record_refusal(conn, refused[1], refused[0], clean=clean)
+            else:
+                if not pinned:
+                    _capture_meta_set(conn, "sales_company_hash", clean["company"])
+                deleted = conn.execute("DELETE FROM sales_lines WHERE day BETWEEN ? AND ?", (clean["from"], clean["to"])).rowcount
+                conn.executemany("INSERT OR REPLACE INTO sales_lines (voucher_key, day, kind, item_key, item_name, qty) VALUES (?, ?, ?, ?, ?, ?)", rows)
+                now_text = _stock_now_utc().strftime("%Y-%m-%dT%H:%M:%S")
+                _capture_meta_set(conn, "sales_last_sync_utc", now_text)
+                _capture_meta_set(conn, "sales_last_from", clean["from"])
+                _capture_meta_set(conn, "sales_last_to", clean["to"])
+                _capture_meta_set(conn, "sales_last_accepted", json.dumps({"utc": now_text, "from": clean["from"], "to": clean["to"], "lines": len(rows)}))
+                _sales_extend_coverage(conn, clean["from"], clean["to"])
+                today = _today_ist()
+                if _capture_meta_get(conn, "last_sales_prune_day_ist") != today:      # once per IST day, never per push
+                    conn.execute("DELETE FROM sales_lines WHERE day < ?", (_ist_day_minus(SALES_RETENTION_DAYS),))
+                    _capture_meta_set(conn, "last_sales_prune_day_ist", today)
         _stock_mgmt_cache_clear()
+        if refused:
+            return _sales_refusal(*refused)
         logger.info("Cloud sales intake: %s..%s, %d lines (%d replaced)", clean["from"], clean["to"], len(rows), deleted)
         return jsonify({"ok": True, "from": clean["from"], "to": clean["to"], "deleted": deleted, "inserted": len(rows)})
     except sqlite3.OperationalError as exc:
@@ -7382,7 +7455,25 @@ def _sales_status_payload():
     unmatched = sorted(key for key in sold if key not in known)
     synced = _parse_utc(meta.get("sales_last_sync_utc"))
     pin = meta.get("sales_company_hash")
+    accepted, refused = _json_dict(meta.get("sales_last_accepted")), _json_dict(meta.get("sales_last_refused"))
+    accepted_at, refused_at = _parse_utc((accepted or {}).get("utc")), _parse_utc((refused or {}).get("utc"))
+
+    def ist_text(moment):
+        return (moment + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M")
+    received_line = f"Last sales received: {ist_text(accepted_at)}" if accepted_at else None
+    refused_line = None
+    if refused_at and (accepted_at is None or refused_at > accepted_at):          # a later accepted push hides the refusal
+        refused_line = f"The shop's last push was refused ({refused.get('status')}) on {ist_text(refused_at)}: {refused.get('reason') or 'no reason given'}"
+    no_news_hours = no_news_line = None
+    if accepted_at:
+        age_seconds = (_stock_now_utc() - accepted_at).total_seconds()
+        if age_seconds > SALES_NO_NEWS_HOURS * 3600:                              # exactly 30 h 00 min is not yet a warning
+            no_news_hours = int(age_seconds // 3600)
+            no_news_line = f"No sales received from the shop for {no_news_hours} hours. Check the shop PC and Tally."
     return {
+        "last_accepted": accepted if accepted_at else None, "last_refused": refused if refused_at else None,
+        "last_received_line": received_line, "refused_line": refused_line, "no_news_line": no_news_line, "no_news_hours": no_news_hours,
+        "sales_covered_from": meta.get("sales_covered_from") if _sales_day(meta.get("sales_covered_from")) else None,
         "has_data": total > 0, "last_sync_utc": meta.get("sales_last_sync_utc"),
         "last_sync_ist": (synced + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M") if synced else None,
         "last_from": meta.get("sales_last_from"), "last_to": meta.get("sales_last_to"),
@@ -7404,13 +7495,14 @@ def stock_mgmt_sales_status():
 @app.route("/admin/stock_mgmt/sales_reset_company", methods=["POST"])
 @admin_required
 def stock_mgmt_sales_reset_company():
-    """Forgets which Tally company the sales data belongs to (the data itself stays); the next sales push pins its own."""
+    """Forgets which Tally company the sales data belongs to (the stored lines stay); the next sales push pins its own. What the shop
+    last sent, what was last refused and how far back the pushes reached are forgotten with it: they described the old pushes."""
     body = request.get_json(silent=True) if request.is_json else None
     if not isinstance(body, dict) or body.get("confirm") != "RESET":
         return jsonify({"error": 'Send {"confirm": "RESET"} to reset the company pin.'}), 422
     try:
         with _STOCK_MGMT_WRITE_LOCK, db.get_connection() as conn:
-            conn.execute("DELETE FROM capture_meta WHERE key = 'sales_company_hash'")
+            conn.execute(f"DELETE FROM capture_meta WHERE key IN ({','.join('?' for _ in SALES_META_RESET_KEYS)})", SALES_META_RESET_KEYS)
         _stock_mgmt_cache_clear()
         return jsonify({"ok": True})
     except Exception as exc:

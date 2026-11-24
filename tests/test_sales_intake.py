@@ -5,7 +5,7 @@ import json
 import sqlite3
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 from tests import support
@@ -455,6 +455,190 @@ class StatusAndReset(SalesBase):
         self.assertIn("No sales data received yet.", text)
         self.assertIn("Reset company pin", text)
         self.assertNotIn("setInterval", text)
+
+
+
+class Visibility(SalesBase):
+    """What the Sales data box tells the owner: when sales last arrived, whether the shop's last push was refused, a warning when the
+    shop goes quiet, and how far back the pushes really reach."""
+
+    def clock(self, moment):
+        return mock.patch.object(self.app_module, "_stock_now_utc", return_value=moment)
+
+    def status(self):
+        self.app_module._stock_mgmt_cache_clear()
+        response = self.admin.get("/admin/stock_mgmt/sales_status")
+        self.assertEqual(response.status_code, 200)
+        return response.get_json()
+
+    def meta_json(self, key):
+        text = self.meta(key)
+        return json.loads(text) if text else None
+
+    # ---- the last refused push
+    def test_409_413_and_422_are_recorded_after_a_valid_token_with_the_reason_and_the_range(self):
+        with self.clock(NOW):
+            self.assertEqual(self.push(body([line()])).status_code, 200)
+        with self.clock(NOW + timedelta(minutes=5)):
+            self.assertEqual(self.push(body([line(v="dddddddd")], company=H2)).status_code, 409)
+        self.assertEqual(self.meta_json("sales_last_refused"), {"utc": "2026-03-20T06:35:00", "status": 409, "reason": "company mismatch",
+                                                                "from": "2026-01-01", "to": "2026-01-31", "lines": 1})
+        with self.clock(NOW + timedelta(minutes=6)):
+            self.assertEqual(self.push(body([line(), line(q=0)])).status_code, 422)
+        refused = self.meta_json("sales_last_refused")
+        self.assertEqual((refused["utc"], refused["status"], refused["from"], refused["to"], refused["lines"]), ("2026-03-20T06:36:00", 422, "2026-01-01", "2026-01-31", 2))
+        self.assertTrue(refused["reason"].startswith("line 1: q must"))
+        with self.clock(NOW + timedelta(minutes=7)):
+            big = body([line(i="X" * 150 + str(n)) for n in range(25000)])
+            self.assertEqual(self.push(big).status_code, 413)
+        self.assertEqual(self.meta_json("sales_last_refused"), {"utc": "2026-03-20T06:37:00", "status": 413, "reason": "body too large",
+                                                                "from": None, "to": None, "lines": None})
+        with self.clock(NOW + timedelta(minutes=8)):
+            self.push(body(many(60)))
+            self.assertEqual(self.push(body([])).status_code, 422)                       # the guard: an empty push over 50 stored lines
+        refused = self.meta_json("sales_last_refused")
+        self.assertEqual((refused["status"], refused["reason"], refused["lines"]), (422, "this push would remove most of the stored sales lines", 0))
+
+    def test_a_body_that_is_not_json_is_recorded_without_a_range(self):
+        with self.clock(NOW):
+            response = self.anon.post(URL, data="not json at all", content_type="application/json", headers=INTAKE_HEADERS)
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(self.meta_json("sales_last_refused"), {"utc": "2026-03-20T06:30:00", "status": 422, "reason": "body must be a JSON object",
+                                                                "from": None, "to": None, "lines": None})
+
+    def test_the_reason_is_at_most_120_characters_and_never_holds_an_item_name(self):
+        self.push(body([line(i="SECRET DESIGN NAME", q=0)]))
+        refused = self.meta_json("sales_last_refused")
+        self.assertLessEqual(len(refused["reason"]), 120)
+        self.assertNotIn("SECRET", json.dumps(refused))
+
+    def test_401_403_503_and_a_wrong_token_are_not_recorded(self):
+        for headers in ({}, {"X-Intake-Token": "wrong"}, {"X-Intake-Token": ""}):
+            self.assertEqual(self.anon.post(URL, json=body([line()]), headers=headers).status_code, 403)
+            self.anon.post(URL, data="not json at all", content_type="application/json", headers=headers)      # a malformed body that never gets past the token
+        with mock.patch.object(self.app_module.Config, "INTAKE_SYNC_TOKEN", ""):
+            self.assertEqual(self.push(body([line()])).status_code, 403)
+        self.assertTrue(self.app_module._SALES_INTAKE_LOCK.acquire(timeout=1))
+        try:
+            with mock.patch.object(self.app_module, "SALES_LOCK_TIMEOUT_SECONDS", 0.05):
+                self.assertEqual(self.push(body([line()])).status_code, 503)
+        finally:
+            self.app_module._SALES_INTAKE_LOCK.release()
+        self.assertIsNone(self.meta("sales_last_refused"))
+        self.assertIsNone(self.meta("sales_last_accepted"))
+
+    def test_an_accepted_push_is_recorded_with_its_range_and_line_count(self):
+        with self.clock(NOW):
+            self.push(body([line(), line(v="bbbbbbbb")]))
+        self.assertEqual(self.meta_json("sales_last_accepted"), {"utc": "2026-03-20T06:30:00", "from": "2026-01-01", "to": "2026-01-31", "lines": 2})
+        self.assertIsNone(self.meta("sales_last_refused"))
+
+    # ---- what the box shows
+    def test_the_last_sales_received_line_uses_the_ist_time_the_page_already_uses(self):
+        with self.clock(NOW):
+            self.push(body([line()]))
+            data = self.status()
+        self.assertEqual(data["last_received_line"], "Last sales received: 2026-03-20 12:00")
+        self.assertEqual(data["last_sync_ist"], "2026-03-20 12:00")
+        self.assertEqual(data["last_accepted"], {"utc": "2026-03-20T06:30:00", "from": "2026-01-01", "to": "2026-01-31", "lines": 1})
+
+    def test_a_refused_push_newer_than_the_last_accepted_one_shows_and_a_later_accepted_push_hides_it(self):
+        with self.clock(NOW):
+            self.push(body([line()]))
+        with self.clock(NOW + timedelta(hours=1)):
+            self.assertEqual(self.push(body([line()], company=H2)).status_code, 409)
+            data = self.status()
+        self.assertEqual(data["refused_line"], "The shop's last push was refused (409) on 2026-03-20 13:00: company mismatch")
+        self.assertEqual(data["last_received_line"], "Last sales received: 2026-03-20 12:00")
+        with self.clock(NOW + timedelta(hours=2)):
+            self.assertEqual(self.push(body([line(q=2)])).status_code, 200)
+            data = self.status()
+        self.assertIsNone(data["refused_line"])
+        self.assertEqual(data["last_received_line"], "Last sales received: 2026-03-20 14:00")
+        self.assertEqual(data["last_refused"]["status"], 409)                       # still on record, just not shown
+
+    def test_a_refusal_older_than_the_last_accepted_push_is_not_shown(self):
+        with self.clock(NOW):
+            self.push(body([line()], company=H1))
+            self.push(body([line()], company=H2))
+            self.assertIsNone(self.status()["refused_line"])                          # same minute: the refusal is not NEWER
+
+    def test_a_refusal_with_nothing_ever_accepted_still_shows_and_adds_no_warning(self):
+        with self.clock(NOW):
+            self.assertEqual(self.push(body([line(q=0)])).status_code, 422)
+            data = self.status()
+        self.assertFalse(data["has_data"])
+        self.assertTrue(data["refused_line"].startswith("The shop's last push was refused (422) on 2026-03-20 12:00: line 0: q must"))
+        self.assertIsNone(data["last_received_line"])
+        self.assertIsNone(data["no_news_line"])
+
+    def test_the_warning_waits_for_more_than_30_hours(self):
+        with self.clock(NOW):
+            self.push(body([line()]))
+        for delta, expected in ((timedelta(hours=29, minutes=59), None), (timedelta(hours=30), None),
+                                (timedelta(hours=30, minutes=1), "No sales received from the shop for 30 hours. Check the shop PC and Tally."),
+                                (timedelta(hours=50, minutes=30), "No sales received from the shop for 50 hours. Check the shop PC and Tally.")):
+            with self.clock(NOW + delta):
+                data = self.status()
+            self.assertEqual(data["no_news_line"], expected, delta)
+        with self.clock(NOW + timedelta(hours=40)):
+            self.push(body([line(q=2)]))                                               # news arrives again: the warning goes
+            self.assertIsNone(self.status()["no_news_line"])
+
+    def test_no_warning_and_the_old_wording_when_nothing_was_ever_accepted(self):
+        with self.clock(NOW + timedelta(days=400)):
+            data = self.status()
+        self.assertFalse(data["has_data"])
+        self.assertEqual((data["no_news_line"], data["no_news_hours"], data["last_received_line"], data["refused_line"]), (None, None, None, None))
+        self.assertIn("No sales data received yet.", self.admin.get("/admin/stock_mgmt").get_data(as_text=True))
+
+    # ---- how far back the pushes reach
+    def test_coverage_starts_with_the_first_push_extends_over_touching_pushes_and_ignores_a_gap(self):
+        def push(frm, to, day_in, **kw):
+            self.assertEqual(self.push(body([line(d=day_in)], frm=frm, to=to, **kw)).status_code, 200)
+            return self.meta("sales_covered_from")
+        self.assertIsNone(self.meta("sales_covered_from"))
+        self.assertEqual(push("2026-03-01", "2026-03-31", "2026-03-10"), "2026-03-01")           # the first push
+        self.assertEqual(push("2026-02-01", "2026-02-28", "2026-02-10"), "2026-02-01")           # last month: touches it, so it extends
+        self.assertEqual(push("2025-11-01", "2025-11-30", "2025-11-10"), "2026-02-01")           # a gap (Dec and Jan are missing): unchanged
+        self.assertEqual(push("2026-02-10", "2026-03-31", "2026-03-10"), "2026-02-01")           # inside what is covered: unchanged
+        self.assertEqual(push("2026-04-01", "2026-04-30", "2026-04-10"), "2026-02-01")           # later than the covered stretch: unchanged
+        self.assertEqual(push("2026-01-01", "2026-01-31", "2026-01-10"), "2026-01-01")           # ends the day before the covered start: extends
+        self.assertEqual(push("2025-12-01", "2025-12-31", "2025-12-10"), "2025-12-01")
+        self.assertEqual(self.status()["sales_covered_from"], "2025-12-01")
+
+    def test_a_refused_push_does_not_move_the_coverage(self):
+        self.push(body([line(d="2026-03-10")], frm="2026-03-01", to="2026-03-31"))
+        self.assertEqual(self.push(body([line(d="2026-02-10")], frm="2026-02-01", to="2026-02-28", company=H2)).status_code, 409)
+        self.assertEqual(self.push(body([line(d="2026-02-10", q=0)], frm="2026-02-01", to="2026-02-28")).status_code, 422)
+        self.assertEqual(self.meta("sales_covered_from"), "2026-03-01")
+
+    def test_reset_clears_the_coverage_and_what_the_shop_last_sent_and_keeps_the_lines(self):
+        with self.clock(NOW):
+            self.push(body([line()]))
+            self.push(body([line()], company=H2))
+        for key in ("sales_covered_from", "sales_last_accepted", "sales_last_refused", "sales_company_hash"):
+            self.assertIsNotNone(self.meta(key), key)
+        self.assertEqual(self.admin.post("/admin/stock_mgmt/sales_reset_company", json={"confirm": "RESET"}).status_code, 200)
+        for key in ("sales_covered_from", "sales_last_accepted", "sales_last_refused", "sales_company_hash"):
+            self.assertIsNone(self.meta(key), key)
+        data = self.status()
+        self.assertEqual((data["sales_covered_from"], data["last_received_line"], data["refused_line"], data["no_news_line"]), (None, None, None, None))
+        self.assertEqual(len(self.rows()), 1)                                         # the lines themselves stay, as before
+
+    # ---- the page
+    def test_the_page_can_show_each_new_line(self):
+        text = self.admin.get("/admin/stock_mgmt").get_data(as_text=True)
+        for needed in ("data.last_received_line", "data.refused_line", "data.no_news_line", "salesNoNews", "salesRefused", "salesReceived",
+                       "first.history_note", "historyNote", "data.sales_covered_from"):
+            self.assertIn(needed, text)
+        self.assertIn("No sales data received yet.", text)                              # the old wording is still the starting text
+
+    def test_the_status_payload_without_data_has_every_new_key_empty(self):
+        data = self.status()
+        for key in ("last_accepted", "last_refused", "last_received_line", "refused_line", "no_news_line", "no_news_hours", "sales_covered_from"):
+            self.assertIn(key, data)
+            self.assertIsNone(data[key], key)
 
 
 if __name__ == "__main__":

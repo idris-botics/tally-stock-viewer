@@ -56,9 +56,9 @@
   "type": "application/json"
  },
  "admin_locked GET /admin/stock_mgmt": {
-  "body": "7d9a1ef0b4",
+  "body": "94fe437614",
   "cache": "",
-  "len": 51723,
+  "len": 52881,
   "location": "",
   "status": 200,
   "type": "text/html"
@@ -80,9 +80,9 @@
   "type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
  },
  "admin_locked GET /admin/stock_mgmt/sales_status": {
-  "body": "2c502f5785",
+  "body": "75b09c1457",
   "cache": "no-store",
-  "len": 265,
+  "len": 433,
   "location": "",
   "status": 200,
   "type": "application/json"
@@ -984,9 +984,9 @@
   "type": "application/json"
  },
  "admin_unlocked GET /admin/stock_mgmt": {
-  "body": "7d9a1ef0b4",
+  "body": "94fe437614",
   "cache": "",
-  "len": 51723,
+  "len": 52881,
   "location": "",
   "status": 200,
   "type": "text/html"
@@ -1008,9 +1008,9 @@
   "type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
  },
  "admin_unlocked GET /admin/stock_mgmt/sales_status": {
-  "body": "2c502f5785",
+  "body": "75b09c1457",
   "cache": "no-store",
-  "len": 265,
+  "len": 433,
   "location": "",
   "status": 200,
   "type": "application/json"
